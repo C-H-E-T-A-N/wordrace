@@ -1,8 +1,10 @@
 # ⚡ Word Race
 
 A 2–3 player, real-time "guess the word" party game for two devices on the same Wi-Fi.
-Each round shows an emoji and a hint above a word with missing letters. The first player to type the word
-(or just its missing letters) scores a point. There are 4 rounds, and **Play Again** always deals 4 new words.
+A game has **3 rounds of 3 words**. Each word is just a picture (emoji) over a row of letter boxes with some letters missing.
+There's no text hint, only the picture. Type straight into the empty boxes; the first player to fill them in correctly
+scores. Each round hides more letters: **Easy**, then **Medium**, then **Hard**. The final screen shows how many words each
+player guessed, and which ones. **Play Again** always deals 9 new words.
 
 - **client/**: React + Vite
 - **server/**: Node.js + Express + Socket.IO. The server is the source of truth: it picks the questions, checks answers, awards points and runs the timers.
@@ -90,7 +92,7 @@ npm test
 ```
 
 This checks the question pool (270 questions, all unique), answer normalization, hidden-letter patterns,
-no-repeat dealing across 200 games, and the race where two or three players answer correctly at nearly the same moment
+no-repeat dealing across 90 games, harder patterns each round, the pause/skip rules, and the race where two or three players answer correctly at nearly the same moment
 (only the first gets the point).
 
 ## How it works
@@ -99,14 +101,15 @@ no-repeat dealing across 200 games, and the race where two or three players answ
 |---|---|
 | **Rooms** | 4-letter code, 2–3 players, stored in server memory |
 | **Questions** | 270 questions in 10 categories (`server/questions.js`). Each room shuffles the whole pool once and deals from it in order. `usedItems` / `usedWords` sets reject anything already played. When the pool runs out, it reshuffles but still excludes the last game. |
-| **Hidden letters** | Generated fresh each round (about 40% of letters, never the first) |
+| **Hidden letters** | Generated fresh for each word. Round 1 hides ~35% of the letters, round 2 ~60%, round 3 ~85%. The first letter always stays visible (`HIDE_BY_ROUND` in `server/game.js`). |
+| **Letter boxes** | Focus jumps to the next empty box as you type, and Backspace goes back. The guess is sent as soon as every box is filled. A wrong guess shakes and clears the boxes. |
 | **Answers** | Case, spaces and punctuation are ignored. Typing the full word or only the missing letters both count. |
-| **Race condition** | Node processes socket events one at a time. The first correct answer locks the round, and every later submission is rejected. |
-| **Timer** | 30 s per round and 4 s of results between rounds, run by the server. Clients receive the *remaining* time, so device clocks don't need to match. |
-| **Answer secrecy** | The correct word is only sent to browsers after the round is locked |
+| **Race condition** | Node processes socket events one at a time. The first correct answer locks the word, and every later submission is rejected. |
+| **Timer** | 15 s per word. When it runs out, the word is **not** skipped: it pauses (⏸) and everyone can keep guessing. Only the host can skip a word, and only after the 15 s are up. After each word there's a 3 s result screen (5 s at the end of a round). The server runs the clock, and clients receive the *remaining* time, so device clocks don't need to match. |
+| **Answer secrecy** | The correct word is only sent to browsers after the word is locked |
 | **Refresh / reconnect** | Each tab remembers its room and player ID in `sessionStorage` and rejoins automatically. A dropped player keeps their seat for 60 s while the others see "*X disconnected. Waiting for them to reconnect...*". |
 | **Leaving** | If a player leaves or doesn't return within 60 s, a 3-player game continues with 2; with fewer than 2 players it returns to the lobby. If the host left, the other player becomes host. |
 | **Errors** | Invalid room code, full room and duplicate name each show a friendly message |
 
-Settings are at the top of `server/game.js` (`ROUNDS`, `ROUND_MS`, `RESULT_MS`). Change the server port with the
+Settings are at the top of `server/game.js` (`ROUNDS`, `WORDS_PER_ROUND`, `WORD_MS`, `HIDE_BY_ROUND`, …). Change the server port with the
 `GAME_PORT` environment variable, and update the proxy target in `client/vite.config.js` to match.

@@ -11,6 +11,8 @@ const session = {
   clear: () => sessionStorage.removeItem('wordrace'),
 };
 
+const DIFFICULTY = ['Easy', 'Medium', 'Hard'];
+
 function useNow() {
   const [now, setNow] = useState(Date.now());
   useEffect(() => { const t = setInterval(() => setNow(Date.now()), 200); return () => clearInterval(t); }, []);
@@ -69,7 +71,7 @@ export default function App() {
   if (!game) screen = <Home onEnter={entered} />;
   else if (game.phase === 'lobby') screen = <Lobby game={game} me={me} lanIps={lanIps} onLeave={leave} onStart={() => socket.emit('start', ack)} />;
   else if (game.phase === 'final') screen = <Final game={game} me={me} onLeave={leave} onAgain={() => socket.emit('playAgain', ack)} />;
-  else screen = <Game game={game} me={me} activity={activity} />;
+  else screen = <Game game={game} me={me} activity={activity} onSkip={() => socket.emit('skip', ack)} />;
 
   return (
     <div className="app">
@@ -95,7 +97,7 @@ function Home({ onEnter }) {
   return (
     <div className="card home">
       <Logo />
-      <p className="tagline">2–3 players. Four words. Fastest fingers win.</p>
+      <p className="tagline">2–3 players. 3 rounds. Name the picture first.</p>
       <label className="field">
         <span>Your name</span>
         <input value={name} maxLength={16} placeholder="e.g. Sam" autoFocus onChange={e => setName(e.target.value)} />
@@ -169,75 +171,144 @@ function Scores({ game, me }) {
   );
 }
 
-function Game({ game, me, activity }) {
+// One box per letter. Given letters are fixed; blanks are inputs you type straight into.
+// Focus jumps to the next blank, Backspace goes back, and the guess is sent as soon as every blank is filled.
+function LetterBoxes({ pattern, answer, open, wordKey, wrongAt, onType, onSubmit }) {
+  const [letters, setLetters] = useState({});
+  const refs = useRef({});
+  const blanks = pattern.flatMap((ch, i) => (ch === '_' ? [i] : []));
+  const focus = i => refs.current[i]?.focus();
+
+  useEffect(() => { setLetters({}); setTimeout(() => focus(blanks[0])); }, [wordKey]);
+  useEffect(() => { if (wrongAt) { setLetters({}); focus(blanks[0]); } }, [wrongAt]);
+
+  const type = (i, value) => {
+    const clean = value.toUpperCase().replace(/[^A-Z]/g, '');
+    // Typing over an existing letter: drop the old one and keep what's new.
+    const typed = letters[i] && clean.length > 1 ? clean.replace(letters[i], '') : clean;
+    const next = { ...letters, [i]: '' };
+    // Several letters at once (paste, phone autocomplete) fill this box and the following blanks.
+    let pos = blanks.indexOf(i);
+    for (const ch of typed) if (pos < blanks.length) next[blanks[pos++]] = ch;
+    setLetters(next);
+    onType();
+    if (!typed) return;
+    const empty = blanks.slice(pos).find(b => !next[b]) ?? blanks.find(b => !next[b]);
+    if (empty !== undefined) focus(empty);
+    else onSubmit(pattern.map((c, k) => (c === '_' ? next[k] : c)).join(''));
+  };
+
+  const onKeyDown = (i, e) => {
+    const pos = blanks.indexOf(i);
+    if (e.key === 'Backspace' && !letters[i] && pos > 0) {
+      e.preventDefault();
+      setLetters({ ...letters, [blanks[pos - 1]]: '' });
+      focus(blanks[pos - 1]);
+    } else if (e.key === 'ArrowLeft' && pos > 0) focus(blanks[pos - 1]);
+    else if (e.key === 'ArrowRight' && pos < blanks.length - 1) focus(blanks[pos + 1]);
+  };
+
+  // Group letters by word so multi-word answers only wrap between words.
+  const words = [[]];
+  pattern.forEach((ch, i) => (ch === ' ' ? words.push([]) : words.at(-1).push(i)));
+
+  return (
+    <div className="word" aria-label={pattern.join(' ')} onClick={() => focus(blanks.find(b => !letters[b]) ?? blanks[0])}>
+      {words.map((idxs, w) => (
+        <div className="word-part" key={w}>
+          {idxs.map(i => pattern[i] !== '_'
+            ? <span key={i} className="tile">{pattern[i]}</span>
+            : answer
+              ? <span key={i} className="tile revealed">{answer[i]}</span>
+              : <input key={i} ref={el => (refs.current[i] = el)} className="tile blank" value={letters[i] ?? ''}
+                  disabled={!open} onChange={e => type(i, e.target.value)} onKeyDown={e => onKeyDown(i, e)}
+                  onFocus={e => e.target.select()} onClick={e => e.stopPropagation()}
+                  autoComplete="off" autoCorrect="off" autoCapitalize="characters" spellCheck={false}
+                  aria-label={`Letter ${i + 1}`} />)}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function Game({ game, me, activity, onSkip }) {
   const now = useNow();
-  const [text, setText] = useState('');
   const [wrong, setWrong] = useState(0);
   const lastTyping = useRef(0);
   const c = game.current;
   const open = game.phase === 'round';
+  const isHost = game.hostId === me;
   const secs = Math.max(0, Math.ceil((game.endsAt - now) / 1000));
-  const pct = open ? Math.max(0, (game.endsAt - now) / game.roundMs) * 100 : 0;
+  const pct = open && !c.overtime ? Math.max(0, (game.endsAt - now) / game.wordMs) * 100 : 0;
+  const wordKey = `${game.round}-${game.word}`;
+  const roundEnd = game.word === game.wordsPerRound;
 
-  useEffect(() => { setText(''); setWrong(0); }, [game.round]);
+  useEffect(() => setWrong(0), [wordKey]);
 
-  const submit = e => {
-    e.preventDefault();
-    if (!open || !text.trim()) return;
-    socket.emit('answer', text, res => { if (!res.correct && !res.reason) setWrong(Date.now()); });
-  };
-  const onChange = e => {
-    setText(e.target.value);
+  const submit = guess => socket.emit('answer', guess, res => { if (!res.correct && !res.reason) setWrong(Date.now()); });
+  const onType = () => {
     if (Date.now() - lastTyping.current > 800) { lastTyping.current = Date.now(); socket.emit('typing'); }
   };
 
   const recent = activity && now - activity.at < 1500 && open;
   const winner = game.players.find(p => p.id === c.winnerId);
+  const next = !roundEnd ? `Next word in ${secs}…`
+    : game.round < game.rounds ? `Round ${game.round + 1} (${DIFFICULTY[game.round]}) starts in ${secs}…`
+    : `Final results in ${secs}…`;
 
   return (
     <div className="game">
       <header className="topbar">
-        <div className="round">Round <b>{game.round}</b> / {game.rounds}</div>
-        <div className={`timer ${open && secs <= 5 ? 'urgent' : ''}`}>{open ? secs : '–'}<small>s</small></div>
+        <div className="round">
+          Round <b>{game.round}</b> / {game.rounds}
+          <small>Word {game.word} / {game.wordsPerRound} · <span className={`diff d${game.round}`}>{DIFFICULTY[game.round - 1]}</span></small>
+        </div>
+        <div className={`timer ${open && !c.overtime && secs <= 5 ? 'urgent' : ''}`}>
+          {!open ? '–' : c.overtime ? '⏸' : <>{secs}<small>s</small></>}
+        </div>
         <Scores game={game} me={me} />
       </header>
       <div className="timebar"><div style={{ width: `${pct}%` }} /></div>
 
       <main className="stage">
-        <div className="chip">{c.category}</div>
-        <div className="emoji-box" key={game.round}><span>{c.emoji}</span></div>
-        <p className="hint">{c.hint}</p>
-        <div className="word" aria-label={c.displayPattern}>
-          {c.pattern.map((ch, i) => ch === ' '
-            ? <span key={i} className="gap" />
-            : <span key={i} className={`tile ${ch === '_' ? (c.answer ? 'revealed' : 'blank') : ''}`}>{ch === '_' ? (c.answer?.[i] ?? '') : ch}</span>)}
+        <div className="emoji-box" key={wordKey}><span>{c.emoji}</span></div>
+        <p className="muted">What's in the picture?</p>
+        <div className={now - wrong < 450 ? 'shake' : ''}>
+          <LetterBoxes pattern={c.pattern} answer={c.answer} open={open} wordKey={wordKey}
+            wrongAt={wrong} onType={onType} onSubmit={submit} />
         </div>
-
-        <form className="answer" onSubmit={submit}>
-          <input key={game.round} autoFocus value={text} onChange={onChange} disabled={!open}
-            className={now - wrong < 450 ? 'shake' : ''}
-            placeholder="Type the word (or just the missing letters)" autoComplete="off" autoCapitalize="characters" spellCheck={false} />
-          <button className="btn primary" disabled={!open || !text.trim()}>Submit</button>
-        </form>
         <div className="activity">
           {open && now - wrong < 2000 ? <span className="bad-text">Not quite, try again!</span>
             : recent ? <span>{activity.type === 'wrong' ? `❌ ${activity.name} guessed wrong` : `✍️ ${activity.name} is typing…`}</span>
             : null}
         </div>
+        {open && c.overtime && (
+          <div className="overtime">
+            <span>⏸ Time's up, but no rush. Keep guessing!</span>
+            {isHost
+              ? <button className="btn" onClick={onSkip}>Skip word ⏭</button>
+              : <small>Only the host can skip this word.</small>}
+          </div>
+        )}
       </main>
 
       {game.phase === 'result' && (
         <div className="overlay">
           <div className="card result">
-            <h2>{!winner ? "⏰ Time's up!" : winner.id === me ? '🎉 You got it!' : `⚡ ${winner.name} got it first!`}</h2>
+            {roundEnd && <div className="chip">Round {game.round} complete!</div>}
+            <h2>{!winner ? '⏭ Word skipped' : winner.id === me ? '🎉 You got it!' : `⚡ ${winner.name} got it first!`}</h2>
             <p className="answer-reveal">{c.emoji} {c.answer}</p>
             <Scores game={game} me={me} />
-            <p className="muted">{game.round < game.rounds ? `Round ${game.round + 1} in ${secs}…` : `Final results in ${secs}…`}</p>
+            <p className="muted">{next}</p>
           </div>
         </div>
       )}
     </div>
   );
+}
+
+function WordList({ items }) {
+  return <div className="guessed">{items.map(h => <span key={h.answer}>{h.emoji} {h.answer}</span>)}</div>;
 }
 
 function Final({ game, me, onLeave, onAgain }) {
@@ -246,19 +317,31 @@ function Final({ game, me, onLeave, onAgain }) {
   const tie = top.length > 1;
   const medal = p => ['🥇', '🥈', '🥉'][ranked.filter(o => o.score > p.score).length];
   const ready = game.players.length >= game.minPlayers && game.players.every(p => p.connected);
+  const skipped = game.history.filter(h => !h.winnerId);
+
   return (
     <div className="card final">
       <div className="trophy">{tie ? '🤝' : '🏆'}</div>
       <h2>{tie ? `${top.map(p => p.name).join(' & ')} tie!` : ranked[0].id === me ? 'You win!' : `${ranked[0].name} wins!`}</h2>
       <ol className="podium">
-        {ranked.map((p, i) => (
-          <li key={p.id} className={!tie && i === 0 ? 'first' : ''}>
-            <span>{medal(p)} {p.name}{p.id === me && ' (you)'}</span><b>{p.score}</b>
-          </li>
-        ))}
+        {ranked.map((p, i) => {
+          const words = game.history.filter(h => h.winnerId === p.id);
+          return (
+            <li key={p.id} className={!tie && i === 0 ? 'first' : ''}>
+              <div className="podium-row">
+                <span>{medal(p)} {p.name}{p.id === me && ' (you)'}</span>
+                <b>{words.length} {words.length === 1 ? 'word' : 'words'}</b>
+              </div>
+              {words.length > 0 && <WordList items={words} />}
+            </li>
+          );
+        })}
       </ol>
+      {skipped.length > 0 && (
+        <div className="skipped"><small className="muted">Nobody got</small><WordList items={skipped} /></div>
+      )}
       <button className="btn primary" disabled={!ready} onClick={onAgain}>{ready ? 'Play Again' : 'Waiting for everyone to connect…'}</button>
-      <p className="muted center">Play Again deals 4 brand-new words.</p>
+      <p className="muted center">Play Again deals {game.rounds * game.wordsPerRound} brand-new words.</p>
       <button className="btn ghost" onClick={onLeave}>Leave room</button>
     </div>
   );

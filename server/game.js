@@ -2,9 +2,13 @@
 import { randomUUID } from 'node:crypto';
 import { POOL } from './questions.js';
 
-export const ROUNDS = 4;
-export const ROUND_MS = 30_000;
-export const RESULT_MS = 4_000;
+export const ROUNDS = 3;
+export const WORDS_PER_ROUND = 3;
+export const WORDS_PER_GAME = ROUNDS * WORDS_PER_ROUND;
+export const WORD_MS = 15_000; // after this the word stays open ("overtime") until solved or skipped by the host
+export const RESULT_MS = 3_000; // pause after each word
+export const ROUND_END_MS = 5_000; // longer pause after the last word of a round
+export const HIDE_BY_ROUND = [0.35, 0.6, 0.85]; // share of letters hidden (after the first) in rounds 1, 2, 3
 export const MAX_PLAYERS = 3;
 export const MIN_PLAYERS = 2;
 
@@ -20,10 +24,10 @@ export function shuffle(arr) {
   return a;
 }
 
-// Hide ~40% of the letters (never the first one, always at least one). Returns an array of chars, "_" = hidden.
-export function makePattern(answer) {
+// Hide `ratio` of the letters (never the first one, always at least one). Returns an array of chars, "_" = hidden.
+export function makePattern(answer, ratio) {
   const candidates = [...answer].map((c, i) => (i > 0 && /[A-Z]/.test(c) ? i : -1)).filter(i => i >= 0);
-  const hidden = new Set(shuffle(candidates).slice(0, Math.max(1, Math.round(candidates.length * 0.4))));
+  const hidden = new Set(shuffle(candidates).slice(0, Math.max(1, Math.round(candidates.length * ratio))));
   return [...answer].map((c, i) => (hidden.has(i) ? '_' : c));
 }
 
@@ -33,9 +37,10 @@ export function createRoom(code) {
     hostId: null,
     players: [],
     phase: 'lobby', // lobby | round | result | final
-    round: 0,
+    wordNo: 0, // 1..WORDS_PER_GAME while playing
     questions: [],
     current: null,
+    history: [], // finished words this game: { emoji, answer, winnerId, winnerName }
     phaseEndsAt: 0,
     deck: shuffle(POOL), // the whole pool, consumed sequentially
     usedItems: new Set(), // question ids already played in this room
@@ -52,11 +57,11 @@ export function addPlayer(room, name) {
   return player;
 }
 
-// Take the next 4 questions from the shuffled deck, skipping anything already played in this room.
+// Take the next 9 questions from the shuffled deck, skipping anything already played in this room.
 // When the pool runs dry, start a fresh cycle that still excludes the game just played.
 export function drawQuestions(room) {
   const picked = [];
-  for (let refills = 0; picked.length < ROUNDS; ) {
+  for (let refills = 0; picked.length < WORDS_PER_GAME; ) {
     const q = room.deck.pop();
     if (!q) {
       if (++refills > 1) throw new Error('Question pool too small');
@@ -75,28 +80,43 @@ export function drawQuestions(room) {
   return picked;
 }
 
+export const roundOf = wordNo => Math.ceil(wordNo / WORDS_PER_ROUND);
+const isRoundEnd = wordNo => wordNo % WORDS_PER_ROUND === 0;
+
 export function startGame(room) {
   room.questions = drawQuestions(room);
   room.players.forEach(p => (p.score = 0));
-  room.round = 0;
-  nextRound(room);
+  room.history = [];
+  room.wordNo = 0;
+  nextWord(room);
 }
 
-export function nextRound(room, now = Date.now()) {
-  const q = room.questions[room.round++];
-  const pattern = makePattern(q.answer);
+export function nextWord(room, now = Date.now()) {
+  const q = room.questions[room.wordNo++];
+  const pattern = makePattern(q.answer, HIDE_BY_ROUND[roundOf(room.wordNo) - 1]);
   room.current = {
     q,
     pattern,
     missing: pattern.map((c, i) => (c === '_' ? q.answer[i] : '')).join(''),
     winnerId: null,
     locked: false,
+    overtime: false,
   };
   room.phase = 'round';
-  room.phaseEndsAt = now + ROUND_MS;
+  room.phaseEndsAt = now + WORD_MS;
 }
 
-// Node handles socket events one at a time, so the first correct submission to reach here locks the round
+function endWord(room, winner, now) {
+  const c = room.current;
+  c.locked = true;
+  c.winnerId = winner?.id ?? null;
+  if (winner) winner.score++;
+  room.history.push({ emoji: c.q.emoji, answer: c.q.answer, winnerId: c.winnerId, winnerName: winner?.name ?? null });
+  room.phase = 'result';
+  room.phaseEndsAt = now + (isRoundEnd(room.wordNo) ? ROUND_END_MS : RESULT_MS);
+}
+
+// Node handles socket events one at a time, so the first correct submission to reach here locks the word
 // and any later one (even milliseconds later) sees locked = true.
 export function submitAnswer(room, playerId, text, now = Date.now()) {
   const c = room.current;
@@ -105,25 +125,27 @@ export function submitAnswer(room, playerId, text, now = Date.now()) {
   if (!guess || (guess !== normalize(c.q.answer) && guess !== normalize(c.missing))) return { correct: false };
   const player = room.players.find(p => p.id === playerId);
   if (!player) return { correct: false, reason: 'closed' };
-  c.locked = true;
-  c.winnerId = playerId;
-  player.score++;
-  room.phase = 'result';
-  room.phaseEndsAt = now + RESULT_MS;
+  endWord(room, player, now);
   return { correct: true };
 }
 
-export function timeUp(room, now = Date.now()) {
-  if (room.phase !== 'round') return;
-  room.current.locked = true;
-  room.phase = 'result';
-  room.phaseEndsAt = now + RESULT_MS;
+// 15 s are up: the word stays open, players keep guessing.
+export function startOvertime(room) {
+  if (room.phase === 'round') room.current.overtime = true;
+}
+
+// Only allowed once the 15 s are up, so a word can't be skipped before anyone had a real go.
+export function skipWord(room, now = Date.now()) {
+  if (room.phase !== 'round' || !room.current.overtime) return false;
+  endWord(room, null, now);
+  return true;
 }
 
 export function toLobby(room) {
   room.phase = 'lobby';
-  room.round = 0;
+  room.wordNo = 0;
   room.current = null;
+  room.history = [];
   room.players.forEach(p => (p.score = 0));
 }
 
@@ -133,21 +155,24 @@ export function publicState(room, now = Date.now()) {
     code: room.code,
     hostId: room.hostId,
     phase: room.phase,
-    round: room.round,
+    round: roundOf(room.wordNo),
     rounds: ROUNDS,
-    roundMs: ROUND_MS,
+    word: ((room.wordNo - 1) % WORDS_PER_ROUND) + 1, // word number inside the round
+    wordsPerRound: WORDS_PER_ROUND,
+    wordMs: WORD_MS,
     minPlayers: MIN_PLAYERS,
     maxPlayers: MAX_PLAYERS,
     remainingMs: Math.max(0, room.phaseEndsAt - now),
     players: room.players.map(({ id, name, score, connected }) => ({ id, name, score, connected })),
+    history: room.history,
+    // Only the picture and the pattern: no text hint, the picture is the clue.
     current: c && {
       emoji: c.q.emoji,
-      hint: c.q.hint,
-      category: c.q.category,
       pattern: c.pattern,
       displayPattern: c.pattern.join(' '),
+      overtime: c.overtime,
       winnerId: c.winnerId,
-      answer: c.locked ? c.q.answer : null, // never sent while the round is open
+      answer: c.locked ? c.q.answer : null, // never sent while the word is open
     },
   };
 }

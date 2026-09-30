@@ -46,12 +46,13 @@ function schedule(room, ms, fn) {
   clearTimeout(room.timer);
   room.timer = setTimeout(() => { fn(); broadcast(room); }, ms);
 }
-function beginRound(room) {
-  schedule(room, G.ROUND_MS, () => { G.timeUp(room); afterRound(room); });
+function beginWord(room) {
+  // No auto-skip: when the time is up the word just goes into overtime and waits for a correct answer or a host skip.
+  schedule(room, G.WORD_MS, () => G.startOvertime(room));
 }
-function afterRound(room) {
-  schedule(room, G.RESULT_MS, () => {
-    if (room.round < G.ROUNDS) { G.nextRound(room); beginRound(room); }
+function afterWord(room) {
+  schedule(room, room.phaseEndsAt - Date.now(), () => {
+    if (room.wordNo < G.WORDS_PER_GAME) { G.nextWord(room); beginWord(room); }
     else room.phase = 'final';
   });
 }
@@ -146,7 +147,7 @@ io.on('connection', socket => {
     if (!['lobby', 'final'].includes(room.phase)) return cb({ ok: false, error: 'Game already running.' });
     if (!canStart(room)) return cb({ ok: false, error: 'Need at least 2 players, all connected.' });
     G.startGame(room);
-    beginRound(room);
+    beginWord(room);
     cb({ ok: true });
     broadcast(room);
   };
@@ -158,8 +159,17 @@ io.on('connection', socket => {
     if (!player) return cb({ correct: false, reason: 'closed' });
     const result = G.submitAnswer(room, player.id, text);
     cb(result);
-    if (result.correct) { afterRound(room); broadcast(room); }
+    if (result.correct) { afterWord(room); broadcast(room); }
     else if (!result.reason) socket.to(room.code).emit('opponent', { type: 'wrong', name: player.name });
+  });
+
+  socket.on('skip', (cb = () => {}) => {
+    const { room, player } = lookup(socket);
+    if (!player || room.hostId !== player.id) return cb({ ok: false, error: 'Only the host can skip a word.' });
+    if (!G.skipWord(room)) return cb({ ok: false, error: 'You can skip once the 15 seconds are up.' });
+    cb({ ok: true });
+    afterWord(room);
+    broadcast(room);
   });
 
   socket.on('typing', () => {
