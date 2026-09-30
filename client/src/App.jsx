@@ -63,7 +63,7 @@ export default function App() {
   const leave = () => { socket.emit('leave'); session.clear(); setGame(null); };
   const ack = res => res?.ok === false && flash(res.error);
 
-  const away = game?.players.find(p => p.id !== me && !p.connected);
+  const away = game?.players.filter(p => p.id !== me && !p.connected).map(p => p.name).join(' & ');
 
   let screen;
   if (!game) screen = <Home onEnter={entered} />;
@@ -74,7 +74,7 @@ export default function App() {
   return (
     <div className="app">
       {!online && <div className="banner bad">Connection lost. Reconnecting…</div>}
-      {online && away && <div className="banner warn">{away.name} disconnected. Waiting for them to reconnect...</div>}
+      {online && away && <div className="banner warn">{away} disconnected. Waiting for them to reconnect...</div>}
       {screen}
       {toast && <div className="toast" key={toast.id}>{toast.text}</div>}
     </div>
@@ -95,7 +95,7 @@ function Home({ onEnter }) {
   return (
     <div className="card home">
       <Logo />
-      <p className="tagline">Two players. Four words. Fastest fingers win.</p>
+      <p className="tagline">2–3 players. Four words. Fastest fingers win.</p>
       <label className="field">
         <span>Your name</span>
         <input value={name} maxLength={16} placeholder="e.g. Sam" autoFocus onChange={e => setName(e.target.value)} />
@@ -117,8 +117,9 @@ function Lobby({ game, me, lanIps, onLeave, onStart }) {
   // Opened as localhost on the host PC -> show its LAN address. Opened any other way (LAN IP, or deployed online) -> this page's own address.
   const local = ['localhost', '127.0.0.1'].includes(location.hostname);
   const url = local && lanIps.length ? `http://${lanIps[0]}${port}` : location.origin;
-  const ready = game.players.length === 2 && game.players.every(p => p.connected);
-  const slots = [0, 1].map(i => game.players[i]);
+  const ready = game.players.length >= game.minPlayers && game.players.every(p => p.connected);
+  const full = game.players.length >= game.maxPlayers;
+  const slots = Array.from({ length: game.maxPlayers }, (_, i) => game.players[i]);
 
   return (
     <div className="card lobby">
@@ -142,12 +143,12 @@ function Lobby({ game, me, lanIps, onLeave, onStart }) {
               {p.id === game.hostId && <em>host</em>}
               {p.id === me && <em>you</em>}
               <small>{p.connected ? 'connected' : 'disconnected'}</small>
-            </> : <span className="waiting">Waiting for player 2…</span>}
+            </> : <span className="waiting">{i < game.minPlayers ? `Waiting for player ${i + 1}…` : `Player ${i + 1} (optional)`}</span>}
           </li>
         ))}
       </ul>
       {isHost
-        ? <button className="btn primary" disabled={!ready} onClick={onStart}>{ready ? 'Start Game' : 'Waiting for player 2…'}</button>
+        ? <button className="btn primary" disabled={!ready} onClick={onStart}>{!ready ? 'Waiting for players…' : full ? 'Start Game' : `Start with ${game.players.length} players`}</button>
         : <p className="muted center">Waiting for the host to start…</p>}
       <button className="btn ghost" onClick={onLeave}>Leave room</button>
     </div>
@@ -241,20 +242,22 @@ function Game({ game, me, activity }) {
 
 function Final({ game, me, onLeave, onAgain }) {
   const ranked = [...game.players].sort((a, b) => b.score - a.score);
-  const tie = ranked.length > 1 && ranked[0].score === ranked[1].score;
-  const ready = game.players.length === 2 && game.players.every(p => p.connected);
+  const top = ranked.filter(p => p.score === ranked[0].score);
+  const tie = top.length > 1;
+  const medal = p => ['🥇', '🥈', '🥉'][ranked.filter(o => o.score > p.score).length];
+  const ready = game.players.length >= game.minPlayers && game.players.every(p => p.connected);
   return (
     <div className="card final">
       <div className="trophy">{tie ? '🤝' : '🏆'}</div>
-      <h2>{tie ? "It's a tie!" : ranked[0].id === me ? 'You win!' : `${ranked[0].name} wins!`}</h2>
+      <h2>{tie ? `${top.map(p => p.name).join(' & ')} tie!` : ranked[0].id === me ? 'You win!' : `${ranked[0].name} wins!`}</h2>
       <ol className="podium">
         {ranked.map((p, i) => (
           <li key={p.id} className={!tie && i === 0 ? 'first' : ''}>
-            <span>{p.name}{p.id === me && ' (you)'}</span><b>{p.score}</b>
+            <span>{medal(p)} {p.name}{p.id === me && ' (you)'}</span><b>{p.score}</b>
           </li>
         ))}
       </ol>
-      <button className="btn primary" disabled={!ready} onClick={onAgain}>{ready ? 'Play Again' : 'Waiting for both players…'}</button>
+      <button className="btn primary" disabled={!ready} onClick={onAgain}>{ready ? 'Play Again' : 'Waiting for everyone to connect…'}</button>
       <p className="muted center">Play Again deals 4 brand-new words.</p>
       <button className="btn ghost" onClick={onLeave}>Leave room</button>
     </div>

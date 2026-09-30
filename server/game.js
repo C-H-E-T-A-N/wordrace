@@ -5,7 +5,8 @@ import { POOL } from './questions.js';
 export const ROUNDS = 4;
 export const ROUND_MS = 30_000;
 export const RESULT_MS = 4_000;
-export const MAX_PLAYERS = 2;
+export const MAX_PLAYERS = 3;
+export const MIN_PLAYERS = 2;
 
 // "  Pizza ", "PIZZA", "pi-zza" -> "pizza"
 export const normalize = s => String(s ?? '').toLowerCase().replace(/[^a-z0-9]/g, '');
@@ -135,6 +136,8 @@ export function publicState(room, now = Date.now()) {
     round: room.round,
     rounds: ROUNDS,
     roundMs: ROUND_MS,
+    minPlayers: MIN_PLAYERS,
+    maxPlayers: MAX_PLAYERS,
     remainingMs: Math.max(0, room.phaseEndsAt - now),
     players: room.players.map(({ id, name, score, connected }) => ({ id, name, score, connected })),
     current: c && {

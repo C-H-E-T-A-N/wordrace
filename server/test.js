@@ -66,4 +66,15 @@ for (const q of POOL) {
   assert.deepEqual([a.score, b.score], [1, 1]);
 }
 
+// 3 players all answer correctly: exactly one point is handed out
+{
+  const room = G.createRoom('TRIO');
+  const ps = ['A', 'B', 'C'].map(n => G.addPlayer(room, n));
+  assert.equal(room.players.length, G.MAX_PLAYERS);
+  G.startGame(room);
+  const results = ps.map(p => G.submitAnswer(room, p.id, room.current.q.answer).correct);
+  assert.deepEqual(results, [true, false, false]);
+  assert.deepEqual(ps.map(p => p.score), [1, 0, 0]);
+}
+
 console.log(`All checks passed (${POOL.length} questions).`);

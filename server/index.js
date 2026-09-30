@@ -6,7 +6,8 @@ import { fileURLToPath } from 'node:url';
 import { Server } from 'socket.io';
 import * as G from './game.js';
 
-const PORT = Number(process.env.GAME_PORT || process.env.PORT) || 3001; // PORT is set by hosts like Render
+// Dev passes 3001 (matches the Vite proxy); hosts like Render set PORT.
+const PORT = Number(process.argv[2] || process.env.GAME_PORT || process.env.PORT) || 3001;
 const RECONNECT_MS = 60_000; // how long a dropped player keeps their seat
 
 const app = express();
@@ -40,7 +41,7 @@ function lookup(socket) {
   return { room, player: room?.players.find(p => p.id === socket.data.playerId) };
 }
 
-// --- round timers (server-driven so both players always see the same flow) ---
+// --- round timers (server-driven so every player sees the same flow) ---
 function schedule(room, ms, fn) {
   clearTimeout(room.timer);
   room.timer = setTimeout(() => { fn(); broadcast(room); }, ms);
@@ -76,7 +77,8 @@ function removePlayer(room, playerId, message) {
   room.players = room.players.filter(p => p !== player);
   if (!room.players.length) { clearTimeout(room.timer); rooms.delete(room.code); return; }
   if (room.hostId === playerId) room.hostId = room.players[0].id;
-  if (room.phase !== 'lobby') { clearTimeout(room.timer); G.toLobby(room); }
+  // A 3-player game carries on with 2; below that, back to the lobby.
+  if (room.phase !== 'lobby' && room.players.length < G.MIN_PLAYERS) { clearTimeout(room.timer); G.toLobby(room); }
   notice(room, message);
   broadcast(room);
 }
@@ -89,7 +91,7 @@ function leaveCurrent(socket) {
 }
 
 function canStart(room) {
-  return room.players.length === G.MAX_PLAYERS && room.players.every(p => p.connected);
+  return room.players.length >= G.MIN_PLAYERS && room.players.every(p => p.connected);
 }
 
 io.on('connection', socket => {
@@ -142,7 +144,7 @@ io.on('connection', socket => {
     if (!room) return cb({ ok: false, error: 'You are not in a room.' });
     if (hostOnly && room.hostId !== player.id) return cb({ ok: false, error: 'Only the host can start.' });
     if (!['lobby', 'final'].includes(room.phase)) return cb({ ok: false, error: 'Game already running.' });
-    if (!canStart(room)) return cb({ ok: false, error: 'Waiting for both players to be connected.' });
+    if (!canStart(room)) return cb({ ok: false, error: 'Need at least 2 players, all connected.' });
     G.startGame(room);
     beginRound(room);
     cb({ ok: true });

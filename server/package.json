@@ -3,7 +3,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "node --watch index.js",
+    "dev": "node --watch index.js 3001",
     "start": "node index.js",
     "test": "node test.js"
   },
