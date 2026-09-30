@@ -7,6 +7,14 @@ Each round shows an emoji and a hint above a word with missing letters. The firs
 - **client/**: React + Vite
 - **server/**: Node.js + Express + Socket.IO. The server is the source of truth: it picks the questions, checks answers, awards points and runs the timers.
 
+## Play online (free hosting)
+
+[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/C-H-E-T-A-N/wordrace)
+
+`render.yaml` sets this up as a free Render web service. Both players open the `https://….onrender.com` URL Render gives you,
+from any network. Free instances sleep after 15 minutes idle, so the first visit afterwards takes ~50 s to wake up,
+and a restart ends any running games (rooms are kept in memory).
+
 ## Requirements
 
 - [Node.js](https://nodejs.org) 18 or newer (check with `node -v`)
