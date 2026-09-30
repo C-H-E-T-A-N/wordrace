@@ -1,0 +1,9 @@
+# Render Blueprint: free Node web service (WebSockets supported).
+services:
+  - type: web
+    name: wordrace
+    runtime: node
+    plan: free
+    buildCommand: npm install --include=dev && npm run build
+    startCommand: npm start
+    healthCheckPath: /
