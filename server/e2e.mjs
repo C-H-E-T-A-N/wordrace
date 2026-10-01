@@ -267,40 +267,42 @@ console.log(`classic: "${classicWord}" -> Sol +100, Ria +75 (ordered points)`);
 q1.s.disconnect();
 q2.s.disconnect();
 
-// ---- Categories with 3 players: private sheets, auto-check, veto, unique vs shared ----
+// ---- Categories with 3 players, 1 letter + 1 category per round: private answers, auto-check, veto, unique vs shared ----
 const cat = ['Tia', 'Uma', 'Vic'].map(client);
 await until(() => cat.every(p => p.s.connected));
 const room6 = (await cat[0].emit('create', { name: 'Tia' })).code;
 for (const p of cat.slice(1)) await p.emit('join', { code: room6, name: p.name });
 assert.ok((await cat[0].emit('setMode', 'categories')).ok);
-assert.ok((await cat[0].emit('setRounds', 1)).ok);
+assert.ok((await cat[0].emit('setRounds', 2)).ok);
 assert.ok((await cat[0].emit('start')).ok);
-await until(() => cat[0].state?.phase === 'round');
-const L = cat[0].state.current.letter;
-const n = cat[0].state.current.categories.length;
-const sheet = (...words) => Array.from({ length: n }, (_, i) => words[i] ?? '');
-// Tia + Uma share answer 0; Vic's answer 0 is unique; Uma's answer 1 has the wrong letter; Vic's answer 1 gets vetoed
-const tia = sheet(`${L}apple`, `${L}tia-one`);
-const uma = sheet(`${L}APPLE`, `Q${L}nope`);
-const vic = sheet(`${L}vic-zero`, `${L}vetoed`);
-assert.ok((await cat[0].emit('cat:answers', { answers: tia, done: true })).ok);
-assert.ok((await cat[1].emit('cat:answers', { answers: uma })).ok); // draft only
-assert.equal(cat[2].state.current.answers, null, 'sheets visible while writing');
-for (const p of cat) for (const x of p.publicPayloads) assert.ok(!x.includes(`${L}tia-one`), 'a draft leaked');
-assert.deepEqual((await cat[1].emit('cat:sync', null)).answers, uma);
-assert.ok((await cat[1].emit('cat:answers', { answers: uma, done: true })).ok);
-assert.ok((await cat[2].emit('cat:answers', { answers: vic, done: true })).ok);
-await until(() => cat[0].state.current.step === 'review');
 const idOfCat = p => p.state.players.find(x => x.name === p.name).id;
-assert.ok((await cat[0].emit('cat:veto', { playerId: idOfCat(cat[2]), index: 1 })).ok);
-for (const p of cat) assert.ok((await p.emit('cat:ready', null)).ok);
-await until(() => cat[0].state.phase === 'result');
-const res = cat[0].state.current.results;
-assert.deepEqual(res[idOfCat(cat[0])].slice(0, 2).map(r => r.status), ['shared', 'unique']);
-assert.deepEqual(res[idOfCat(cat[1])].slice(0, 2).map(r => r.status), ['shared', 'invalid']);
-assert.deepEqual(res[idOfCat(cat[2])].slice(0, 2).map(r => r.status), ['unique', 'invalid']);
+const statuses = () => cat.map(p => cat[0].state.current.results[idOfCat(p)][0].status);
+const playCatRound = async (round, answers, vetoes = []) => {
+  await until(() => cat.every(p => p.state?.phase === 'round' && p.state.round === round && p.state.current.step === 'write'), 15000);
+  assert.equal(cat[0].state.current.categories.length, 1, 'one category per round');
+  const L = cat[0].state.current.letter;
+  const mine = answers.map(a => a.replace('#', L));
+  await cat[0].emit('cat:answers', { answers: [mine[0]], done: true });
+  await cat[1].emit('cat:answers', { answers: [mine[1]] }); // draft only for now
+  assert.equal(cat[2].state.current.answers, null, 'answers visible while writing');
+  for (const p of cat) for (const x of p.publicPayloads) assert.ok(!x.includes(`"${mine[0]}"`), 'an answer leaked while writing');
+  assert.deepEqual((await cat[1].emit('cat:sync', null)).answers, [mine[1]]);
+  await cat[1].emit('cat:answers', { answers: [mine[1]], done: true });
+  await cat[2].emit('cat:answers', { answers: [mine[2]], done: true });
+  await until(() => cat[0].state.current.step === 'review');
+  for (const [from, to] of vetoes) assert.ok((await cat[from].emit('cat:veto', { playerId: idOfCat(cat[to]), index: 0 })).ok);
+  for (const p of cat) assert.ok((await p.emit('cat:ready', null)).ok);
+  await until(() => cat[0].state.phase === 'result');
+  return L;
+};
+// Round 1: Tia and Uma write the same thing (different case) -> shared, 0; Vic's is unique -> +100
+const L1 = await playCatRound(1, ['#apple', '#APPLE', '#vic-one']);
+assert.deepEqual(statuses(), ['shared', 'shared', 'unique']);
+// Round 2: Uma's has the wrong letter; Tia 👎 Vic's (1 of 2 other players = half) -> out; Tia's unique -> +100
+const L2 = await playCatRound(2, ['#tia-two', 'Q#nope', '#vetoed'], [[0, 2]]);
+assert.deepEqual(statuses(), ['unique', 'invalid', 'invalid']);
 assert.deepEqual(cat[0].state.players.map(p => p.score), [100, 0, 100]);
-console.log(`categories: letter ${L}, shared answers scored 0, unique +100, wrong letter and vetoed answers rejected`);
+console.log(`categories: letters ${L1}, ${L2} (one category each): shared 0, unique +100, wrong letter and vetoed answers out`);
 for (const p of cat) p.s.disconnect();
 
 for (const p of [...players, p1, p2]) p.s.disconnect();

@@ -18,7 +18,7 @@ const MODE_CARDS = [
   { key: 'draw', icon: '🎨', name: 'Draw & Guess', desc: 'Take turns drawing a secret word while the others guess.' },
   { key: 'relay', icon: '🏃', name: 'Relay Draw', desc: 'Only the first artist knows the word; everyone adds a 15 s leg, then all guess.' },
   { key: 'imposter', icon: '🕵️', name: 'Odd One Out', desc: 'One player has a different word. Give clues, vote out the imposter. 3+ players.' },
-  { key: 'categories', icon: '🔠', name: 'Categories', desc: 'A letter + 6 categories: write something for each. Only unique answers score!' },
+  { key: 'categories', icon: '🔠', name: 'Categories', desc: 'A letter + a category: name something that fits. Only answers nobody else gives score!' },
 ];
 const QUIZ_MODES = ['picture', 'letters', 'classic'];
 const MEDALS = ['🥇', '🥈', '🥉'];
@@ -174,7 +174,7 @@ function RoundsInput({ game, isHost, actions }) {
     ? `each player draws ${n === 1 ? 'once' : `${n} times`} → ${n * game.players.length} turns`
     : game.mode === 'relay' ? `${n} ${n === 1 ? 'drawing' : 'drawings'}, each passed through every player`
     : game.mode === 'imposter' ? `${n} ${n === 1 ? 'round' : 'rounds'}, a new word pair and imposter each time`
-    : game.mode === 'categories' ? `${n} ${n === 1 ? 'letter' : 'letters'} × 6 categories`
+    : game.mode === 'categories' ? `${n} ${n === 1 ? 'round' : 'rounds'}, each a new letter + category`
     : per > 1 ? `${n} × ${per} words = ${n * per} words` : `${n} ${n === 1 ? 'word' : 'words'}`;
   return (
     <div className="rounds">
@@ -565,23 +565,23 @@ function CategoriesGame({ game, me }) {
       <div className="timebar"><div style={{ width: `${pct}%` }} /></div>
 
       <main className="cat-stage">
-        <div className="letter-badge" aria-label={`Letter ${c.letter}`}>{c.letter}</div>
+        <div className="cat-prompt">
+          <div className="letter-badge" aria-label={`Letter ${c.letter}`}>{c.letter}</div>
+          <div className="cat-title"><small>Category</small><b>{c.categories.join(' · ')}</b></div>
+        </div>
         {c.step === 'write' && (
           <>
-            <p className="muted center">Everything must start with <b>{c.letter}</b>. Only answers nobody else gives will score!</p>
-            <div className="cat-sheet">
-              {c.categories.map((cat, i) => (
-                <label key={cat} className="cat-row">
-                  <span>{cat}</span>
-                  <input value={answers[i]} maxLength={30} disabled={!writing || done} placeholder={`${c.letter}…`}
-                    className={startsWith(answers[i], c.letter) ? '' : 'bad'} onChange={e => change(i, e.target.value)}
-                    autoComplete="off" spellCheck={false} />
-                </label>
-              ))}
-            </div>
-            <button className="btn primary" disabled={!writing || done} onClick={finish}>
-              {done ? `Done ✔ Waiting for the others (${c.done.length}/${connected})` : 'Done ✔'}
-            </button>
+            <p className="muted center">Name a <b>{c.categories[0]}</b> starting with <b>{c.letter}</b>. Only answers nobody else gives will score!</p>
+            {/* One category per round; Enter = Done */}
+            <form className="answer" onSubmit={e => { e.preventDefault(); if (writing && !done) finish(); }}>
+              <input value={answers[0]} maxLength={30} disabled={!writing || done} autoFocus
+                placeholder={`${c.categories[0]} starting with ${c.letter}…`}
+                className={startsWith(answers[0], c.letter) ? '' : 'bad'} onChange={e => change(0, e.target.value)}
+                autoComplete="off" spellCheck={false} enterKeyHint="done" />
+              <button className="btn primary" disabled={!writing || done}>Done ✔</button>
+            </form>
+            {answers[0] && !startsWith(answers[0], c.letter) && <p className="bad-text">That doesn't start with {c.letter}!</p>}
+            {done && <p className="muted">✔ Handed in. Waiting for the others ({c.done.length}/{connected})…</p>}
           </>
         )}
 

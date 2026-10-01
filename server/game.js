@@ -39,10 +39,10 @@ export const MODES = {
     name: 'Classic', rounds: 4, maxRounds: 10, wordsPerRound: 1, wordMs: 30_000, overtime: false,
     showEmoji: true, hide: { from: 0.4, to: 0.4 }, showHint: true, input: 'text',
   },
-  // Scattergories-style: a letter + 6 categories; write answers, review/veto them, unique answers score.
+  // Scattergories-style: each round 1 letter + 1 category; write an answer, review/veto, unique answers score.
   categories: {
-    name: 'Categories', rounds: 3, maxRounds: 8, wordsPerRound: 1, overtime: false, input: 'categories',
-    perRound: 6, writeMs: 60_000, reviewMs: 40_000,
+    name: 'Categories', rounds: 5, maxRounds: 15, wordsPerRound: 1, overtime: false, input: 'categories',
+    writeMs: 30_000, reviewMs: 20_000,
   },
   // A Draw & Guess round = every player draws once, so turns = players x rounds.
   draw: {
@@ -188,12 +188,11 @@ export function startGame(room, now = Date.now()) {
   } else if (isRelay(room)) {
     room.questions = drawFrom(room.decks.draw, room.rounds.relay);
   } else if (room.mode === 'categories') {
-    // A different letter every round, and 6 categories per round that don't repeat within the game.
+    // A different letter and a different category every round (no repeats within the game).
+    // Drawn in one go so nothing repeats inside the game, nor from the previous game.
     const letters = shuffle(LETTERS);
-    room.questions = Array.from({ length: room.rounds.categories }, (_, i) => ({
-      letter: letters[i % letters.length],
-      categories: drawFrom(room.decks.categories, MODES.categories.perRound).map(c => c.answer),
-    }));
+    const cats = drawFrom(room.decks.categories, room.rounds.categories);
+    room.questions = cats.map((cat, i) => ({ letter: letters[i % letters.length], categories: [cat.answer] }));
   } else if (room.mode === 'imposter') {
     room.questions = drawFrom(room.decks.imposter, room.rounds.imposter);
     room.imposterOrder = shuffle(room.players.map(p => p.id)); // everyone gets a turn as imposter before anyone repeats
@@ -455,7 +454,7 @@ function finishImposter(room, now, outcome) {
 // ---------- Categories (Scattergories-style) ----------
 
 export const CAT_UNIQUE = 100; // a valid answer nobody else gave
-const CAT_RESULT_MS = 9_000; // the result card has a lot to read
+const CAT_RESULT_MS = 6_000;
 
 function startCategories(room, q, now) {
   room.current = {

@@ -210,13 +210,32 @@ function newGame(mode, names = ['A', 'B']) {
 // Categories: letter + categories, private drafts, auto checks, vetoes, unique vs shared scoring
 {
   const { CATEGORY_POOL, LETTERS } = await import('./categories.js');
-  assert.ok(CATEGORY_POOL.length >= 24 && !LETTERS.includes('Q') && !LETTERS.includes('X'));
+  assert.ok(CATEGORY_POOL.length >= 2 * G.MODES.categories.maxRounds && !LETTERS.includes('Q') && !LETTERS.includes('X'));
   const { room, ps: [a, b, c] } = newGame('categories', ['A', 'B', 'C']);
   G.setMode(room, 'categories');
-  assert.equal(room.questions.length, 3);
-  assert.equal(new Set(room.questions.map(q => q.letter)).size, 3, 'letter repeated');
+  assert.equal(room.questions.length, 5); // default 5 rounds
+  assert.equal(new Set(room.questions.map(q => q.letter)).size, 5, 'letter repeated');
+  assert.ok(room.questions.every(q => q.categories.length === 1), 'one category per round');
   const allCats = room.questions.flatMap(q => q.categories);
   assert.equal(new Set(allCats).size, allCats.length, 'category repeated within the game');
+  // Long games back to back (15 rounds each): never a repeat inside a game, nor from the game before
+  {
+    const r2 = G.createRoom('LONG');
+    ['A', 'B'].forEach(n => (G.addPlayer(r2, n).connected = true));
+    G.setMode(r2, 'categories');
+    assert.ok(G.setRounds(r2, 15));
+    let prev = [];
+    for (let game = 0; game < 6; game++) {
+      G.startGame(r2);
+      const cats = r2.questions.map(q => q.categories[0]);
+      const letters = r2.questions.map(q => q.letter);
+      assert.equal(new Set(cats).size, 15, `game ${game}: category repeated`);
+      assert.equal(new Set(letters).size, 15, `game ${game}: letter repeated`);
+      assert.ok(cats.every(x => !prev.includes(x)), `game ${game}: category from the previous game`);
+      prev = cats;
+      G.toLobby(r2);
+    }
+  }
   const cur = room.current;
   cur.q = { letter: 'S', categories: ['Animal', 'Food', 'Country', 'Movie'] }; // fixed round for the test
   assert.equal(G.catProblem('  the Shining', 'S'), null);

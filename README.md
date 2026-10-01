@@ -11,7 +11,7 @@ One room, one lobby: the host picks one of seven game modes.
 | 🎨 **Draw & Guess** | Pictionary. Players take turns drawing a secret word on a shared canvas while everyone else guesses. Points for fast guessers and for the drawer. |
 | 🏃 **Relay Draw** | Only the first artist sees the word. The drawing is passed around: everyone adds a 15 s leg without knowing what it is, then everyone guesses. |
 | 🕵️ **Odd One Out** | Everyone gets the same secret word except the imposter, who gets a related one (and doesn't know it). One-word clues, a vote, and a last guess. 3+ players. |
-| 🔠 **Categories** | Scattergories-style: a random letter and 6 categories (Animal, Food, Country, Movie…). Write one answer per category starting with that letter. Only answers nobody else gave score. |
+| 🔠 **Categories** | Scattergories-style: each round shows one letter and one category (e.g. **S** + *Animal*). Write something that fits and starts with that letter. Only answers nobody else gave score. |
 
 **Points in answer order:** in Picture, Letters and Classic (and Draw & Guess / Relay) the 1st correct answer gets
 **100**, the 2nd **75**, the 3rd **50**, then 25, 13, 10… A correct answer no longer ends the word: everyone can still
@@ -27,7 +27,7 @@ get it until time runs out (and once you have it, your input locks). A word ends
 | Draw & Guess | 1 | 1–5 | every player draws once |
 | Relay Draw | 3 | 1–8 | one word, passed through every player |
 | Odd One Out | 3 | 1–8 | one word pair, a new imposter |
-| Categories | 3 | 1–8 | one letter × 6 categories |
+| Categories | 5 | 1–15 | one letter + one category |
 
 In Picture and Letters, a word doesn't skip when its 15 s run out with **nobody** right: it pauses (⏸) so everyone can
 keep guessing, and the host may skip it. Once someone gets a paused word, the others get a **5 s last call**. Every finished game is saved to the room's **leaderboard** (wins, games, words guessed,
@@ -120,15 +120,15 @@ a player who is away when their turn comes up is skipped.
 
 ### Categories
 
-1. **Write (60 s):** a letter (e.g. **S**) and 6 categories. Type one answer per category, starting with the letter
+1. **Write (30 s):** a letter and a category, e.g. **S** + *Movie*. Type one answer starting with the letter
    ("the/a/an" are ignored, so *The Shining* counts for S). Answers are saved as you type and stay hidden from the
    others. Press **Done ✔** when finished; the round moves on when everyone is done or time is up.
-2. **Review (40 s):** everyone's answers are shown. Wrong-letter answers are crossed out automatically. Press 👎 on any
-   answer that doesn't fit its category; if **at least half of the other players** 👎 it, it doesn't count.
+2. **Review (20 s):** everyone's answers are shown. Wrong-letter answers are crossed out automatically. Press 👎 on any
+   answer that doesn't fit the category; if **at least half of the other players** 👎 it, it doesn't count.
    Press **✔ Looks good** when you're happy (the round ends when everyone has).
 3. **Scoring:** a valid answer nobody else gave → **+100**. If two or more players wrote the same thing (ignoring
    capitals, spaces and plurals: *Snake* = *snakes*), **none of them** score for it.
-4. A new letter each round (hard letters Q, U, V, X, Y, Z are never picked) and categories don't repeat within a game.
+4. A new letter and a new category each round (hard letters Q, U, V, X, Y, Z are never picked; nothing repeats within a game).
 
 ### Voice answers (Picture mode)
 
@@ -174,7 +174,7 @@ Then open `http://<host-LAN-IP>:3001` on every device.
 npm test
 ```
 
-Checks the game rules without a network: the word pools (270 quiz questions, 170 drawing words, 99 word pairs, 28 categories, all unique),
+Checks the game rules without a network: the word pools (270 quiz questions, 170 drawing words, 99 word pairs, 42 categories, all unique),
 answer matching, letter patterns, no repeats across many games, every mode's flow, hint voting,
 ordered points (100/75/50…), pause + last call, Draw & Guess / Relay rotation, scoring, secrecy and disconnects,
 Odd One Out clues, votes, ties and last guesses, Categories drafts, vetoes and unique/shared scoring, and the leaderboard.
@@ -197,7 +197,7 @@ node server/e2e.mjs
 | **Race condition** | Node processes socket events one at a time, so the order correct answers reach the server decides 100 / 75 / 50; two answers at the same instant never get the same place. Each player scores once per word. |
 | **Secrets** | Answers are only sent to everyone once a word or turn is over. The Draw & Guess word goes only to the drawer's socket (`draw-game:word`; Relay: the starter's), and to a guesser only in the reply to their own correct guess. In Odd One Out each player's word goes only to their own socket (`imposter:word`); who the imposter is and how people voted stay hidden until the votes are counted. |
 | **Drawing sync** | The drawer's strokes are small segments `{x, y, px, py, w, c, t}` in 0–1 coordinates (any screen size), batched ~30 times a second (`draw-game:stroke`). The server only accepts them from the current drawer, validates them, relays them to the room and keeps them so a refreshed player gets the picture back (`draw-game:sync`). `draw-game:clear` wipes it. |
-| **Timers** | Run on the server; clients get the *remaining* time so device clocks don't matter. Picture/Letters 15 s (then pause, or a 5 s last call), Classic 30 s, Draw & Guess 60 s, Relay 15 s per leg + 30 s guessing, Odd One Out 30 s per clue / 45 s vote / 20 s last guess, Categories 60 s writing + 40 s review. |
+| **Timers** | Run on the server; clients get the *remaining* time so device clocks don't matter. Picture/Letters 15 s (then pause, or a 5 s last call), Classic 30 s, Draw & Guess 60 s, Relay 15 s per leg + 30 s guessing, Odd One Out 30 s per clue / 45 s vote / 20 s last guess, Categories 30 s writing + 20 s review. |
 | **Refresh / reconnect** | Each tab remembers its room and player ID in `sessionStorage` and rejoins automatically. A dropped player keeps their seat for 60 s while the others see "*X disconnected. Waiting for them to reconnect...*". |
 | **Leaving** | A game carries on while enough players remain (2, or 3 for Odd One Out); otherwise it returns to the lobby. If the host leaves, the next player becomes host. |
 | **Leaderboard** | Kept per room by player name (survives leaving and rejoining the room), newest 50 games: wins, games, total points and best single-game score. |
