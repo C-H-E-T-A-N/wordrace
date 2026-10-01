@@ -484,3 +484,45 @@ button, .mode, .vote-btn, .veto, .tool, .pill { touch-action: manipulation; }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; transition-duration: 0.01ms !important; }
 }
+
+/* ===== game pictures as images (identical on every device) ===== */
+img.emoji { display: inline-block; width: 1em; height: 1em; vertical-align: -0.14em; user-select: none; -webkit-user-drag: none; }
+.emoji-box img.emoji { display: block; }
+
+/* ===== winner celebration: full-width name + emoji rain over everything for ~3 s ===== */
+.celebration {
+  position: fixed; inset: 0; z-index: 60; pointer-events: none; overflow: hidden; display: grid; place-items: center;
+  background: radial-gradient(ellipse at center, rgba(26, 16, 64, 0.88) 0, rgba(26, 16, 64, 0.6) 55%, rgba(26, 16, 64, 0.3) 100%);
+  animation: celebrate 3.2s ease forwards;
+}
+@keyframes celebrate { 0% { opacity: 0; } 6% { opacity: 1; } 84% { opacity: 1; } 100% { opacity: 0; } }
+.rain span { position: absolute; top: -80px; display: block; animation: rain-fall linear infinite both; }
+.rain img.emoji { width: 100%; height: 100%; }
+@keyframes rain-fall {
+  from { transform: translateY(0) rotate(0deg); }
+  to { transform: translateY(calc(100vh + 160px)) rotate(var(--spin)); }
+}
+.winner-banner { position: relative; width: 100vw; padding: 0 4vw; text-align: center; animation: banner-in 0.7s cubic-bezier(.2, 1.5, .4, 1) both; }
+@keyframes banner-in { from { transform: scale(0.3) rotate(-8deg); opacity: 0; } to { transform: none; opacity: 1; } }
+.winner-trophy { font-size: clamp(64px, 16vw, 130px); line-height: 1; margin-bottom: 1vh; animation: trophy-bob 1.1s ease-in-out infinite; }
+.winner-trophy img.emoji { filter: drop-shadow(0 10px 22px rgba(255, 203, 61, 0.55)); }
+@keyframes trophy-bob { 50% { transform: translateY(-10px) rotate(-6deg) scale(1.06); } }
+.winner-name {
+  margin: 0; white-space: nowrap; line-height: 1.05; font-family: var(--font-display); font-weight: 700; letter-spacing: 0.01em;
+}
+.winner-name span {
+  display: inline-block; animation: letter-drop 0.55s cubic-bezier(.2, 1.7, .4, 1) both, letter-wave 1.6s ease-in-out 0.9s infinite;
+  text-shadow: 0 0.06em 0 rgba(0, 0, 0, 0.35), 0 0 0.35em rgba(255, 255, 255, 0.25);
+}
+.winner-name span:nth-child(5n + 1) { color: #ffcb3d; }
+.winner-name span:nth-child(5n + 2) { color: #ff5fa2; }
+.winner-name span:nth-child(5n + 3) { color: #5be3a6; }
+.winner-name span:nth-child(5n + 4) { color: #7aa7ff; }
+.winner-name span:nth-child(5n + 5) { color: #c38bff; }
+@keyframes letter-drop { from { transform: translateY(-140%) scale(0.3) rotate(-25deg); opacity: 0; } to { transform: none; opacity: 1; } }
+@keyframes letter-wave { 50% { transform: translateY(-0.08em); } }
+.winner-sub {
+  margin: 1.5vh 0 0; font-size: clamp(18px, 5vw, 32px); font-weight: 800; color: var(--text);
+  text-shadow: 0 2px 14px rgba(0, 0, 0, 0.6); animation: rise 0.5s ease-out 0.7s both;
+}
+.celebration.mine .winner-sub { color: var(--accent); }

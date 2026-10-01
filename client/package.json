@@ -3,7 +3,10 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "emoji": "node scripts/copy-emoji.mjs",
+    "predev": "node scripts/copy-emoji.mjs",
     "dev": "vite",
+    "prebuild": "node scripts/copy-emoji.mjs",
     "build": "vite build"
   },
   "dependencies": {
@@ -15,6 +18,7 @@
     "twemoji-colr-font": "^15.0.3"
   },
   "devDependencies": {
+    "@twemoji/svg": "^15.0.0",
     "@vitejs/plugin-react": "^4.3.2",
     "vite": "^5.4.8"
   }

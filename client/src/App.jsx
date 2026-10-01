@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { io } from 'socket.io-client';
 import { buzz, confetti, isMuted, play, setMuted } from './fx.js';
+import { emojiFile, RAIN } from './emoji.js';
 
 // Connect to the same origin the page came from (LAN IP or localhost). In dev, Vite proxies /socket.io to the server.
 const socket = io();
@@ -42,6 +43,7 @@ export default function App() {
   const [activity, setActivity] = useState(null);
   const [muted, setMutedState] = useState(isMuted);
   const [splash, setSplash] = useState(null);
+  const [celebration, setCelebration] = useState(null);
   const prevGame = useRef(null);
 
   const flash = text => setToast({ text, id: Date.now() });
@@ -89,9 +91,24 @@ export default function App() {
     if (game.phase === 'result' && p.phase === 'round' && gained <= 0) play('pop');
     if (game.phase === 'final' && p.phase !== 'final') {
       const top = Math.max(...game.players.map(x => x.score));
-      if (top > 0 && myScore(game) === top) { play('win'); buzz([60, 40, 120]); confetti(160); } else play('pop');
+      const winners = game.players.filter(x => x.score === top);
+      const iWon = top > 0 && myScore(game) === top;
+      setCelebration({
+        id: Date.now(),
+        title: top === 0 ? 'Game over!' : winners.length > 1 ? "It's a tie!" : `${winners[0].name} wins!`,
+        sub: top === 0 ? 'Nobody scored this time' : winners.length > 1 ? `${winners.map(w => w.name).join(' & ')} · ${top} pts` : `${top} points`,
+        iWon,
+      });
+      play('win');
+      if (iWon) buzz([60, 40, 120]);
     }
   }, [game]);
+
+  useEffect(() => {
+    if (!celebration) return;
+    const t = setTimeout(() => setCelebration(null), 3200);
+    return () => clearTimeout(t);
+  }, [celebration]);
 
   useEffect(() => {
     if (!splash) return;
@@ -142,10 +159,64 @@ export default function App() {
           {splash.sub && <small>{splash.sub}</small>}
         </div>
       )}
+      {celebration && <Celebration key={celebration.id} {...celebration} />}
       {toast && <div className="toast" key={toast.id}>{toast.text}</div>}
     </div>
   );
 }
+
+// Game over: the winner's name pops up across the whole width while celebration emoji rain over everything
+// for 3 seconds. Letters drop in one by one; the size is computed so the name fills (but never overflows) the screen.
+function Celebration({ title, sub, iWon }) {
+  const [drops] = useState(() => Array.from({ length: 46 }, (_, i) => ({
+    char: RAIN[i % RAIN.length],
+    left: Math.random() * 100,
+    size: 26 + Math.random() * 34,
+    delay: Math.random() * 1.6,
+    duration: 1.3 + Math.random() * 1.1,
+    spin: (Math.random() - 0.5) * 720,
+  })));
+  const letters = [...title];
+  // Fredoka bold is ~0.62em per letter: fill ~92% of the width, capped so short names don't get absurd.
+  const fontSize = `min(24vw, ${(92 / (letters.length * 0.62)).toFixed(2)}vw, 22vh)`;
+  return (
+    <div className={`celebration ${iWon ? 'mine' : ''}`} role="status" aria-live="assertive">
+      <div className="rain" aria-hidden="true">
+        {drops.map((d, i) => (
+          <span key={i} style={{ left: `${d.left}%`, width: d.size, height: d.size, animationDelay: `${d.delay}s`, animationDuration: `${d.duration}s`, '--spin': `${d.spin}deg` }}>
+            <Emoji char={d.char} />
+          </span>
+        ))}
+      </div>
+      <div className="winner-banner">
+        <div className="winner-trophy"><Emoji char={iWon ? '👑' : '🏆'} /></div>
+        <h1 className="winner-name" style={{ fontSize }} aria-label={title}>
+          {letters.map((ch, i) => <span key={i} style={{ animationDelay: `${0.15 + i * 0.05}s` }}>{ch === ' ' ? '\u00a0' : ch}</span>)}
+        </h1>
+        <p className="winner-sub">{iWon ? '🎉 That\'s you! ' : ''}{sub}</p>
+      </div>
+    </div>
+  );
+}
+
+// A game picture as a Twemoji image, so it looks identical on every phone and browser.
+// Falls back to the plain character if the image is missing.
+function Emoji({ char, className = '' }) {
+  const [broken, setBroken] = useState(false);
+  if (!char) return null;
+  if (broken) return <span className={className}>{char}</span>;
+  return <img className={`emoji ${className}`} src={`/emoji/${emojiFile(char)}.svg`} alt={char} draggable={false} onError={() => setBroken(true)} />;
+}
+
+// Enter submits, on every keyboard. We don't rely on the browser's built-in "Enter submits the form": it silently
+// does nothing while the form's button is disabled, and phone keyboards with word suggestions (Gboard, Samsung)
+// only hand React the typed word after Enter, so the button still looked disabled at that moment. Reading the
+// value straight from the input avoids both problems.
+const onEnter = fn => e => {
+  if (e.key !== 'Enter' && e.keyCode !== 13) return;
+  e.preventDefault();
+  fn(e.currentTarget.value);
+};
 
 // Second line of the round splash: what this round is about (never a secret).
 function splashLine(game) {
@@ -191,12 +262,13 @@ function Logo() {
   return <h1 className="logo">Word<span>Race</span></h1>;
 }
 
-function Home({ onEnter }) {
+function Home({ onEnter: entered }) {
   const [name, setName] = useState(() => localStorage.getItem('wordrace-name') || '');
   const [code, setCode] = useState(() => new URLSearchParams(location.search).get('room') || '');
-  const saveName = () => localStorage.setItem('wordrace-name', name.trim());
-  const create = () => { saveName(); socket.emit('create', { name }, onEnter); };
-  const join = e => { e.preventDefault(); saveName(); socket.emit('join', { code, name }, onEnter); };
+  // `n` / `c` let the Enter handlers pass what is in the box right now (React state may lag behind on phones).
+  const saveName = n => localStorage.setItem('wordrace-name', n.trim());
+  const create = (n = name) => { saveName(n); socket.emit('create', { name: n }, entered); };
+  const join = (n = name, c = code) => { saveName(n); socket.emit('join', { code: c, name: n }, entered); };
 
   return (
     <div className="card home">
@@ -204,13 +276,15 @@ function Home({ onEnter }) {
       <p className="tagline">Party word games for 2–8 players. Guess, spell or draw it first.</p>
       <label className="field">
         <span>Your name</span>
-        <input value={name} maxLength={16} placeholder="e.g. Sam" autoFocus onChange={e => setName(e.target.value)} />
+        <input value={name} maxLength={16} placeholder="e.g. Sam" autoFocus onChange={e => setName(e.target.value)}
+          onKeyDown={onEnter(v => { if (!v.trim()) return; setName(v); code.length === 4 ? join(v) : create(v); })} enterKeyHint="go" />
       </label>
-      <button className="btn primary" disabled={!name.trim()} onClick={create}>Create Room</button>
+      <button className="btn primary" disabled={!name.trim()} onClick={() => create()}>Create Room</button>
       <div className="divider"><span>or join a friend</span></div>
-      <form className="join" onSubmit={join}>
-        <input className="code-input" value={code} maxLength={4} placeholder="CODE"
-          onChange={e => setCode(e.target.value.toUpperCase().replace(/[^A-Z]/g, ''))} />
+      <form className="join" onSubmit={e => { e.preventDefault(); join(); }}>
+        <input className="code-input" value={code} maxLength={4} placeholder="CODE" enterKeyHint="go"
+          onChange={e => setCode(e.target.value.toUpperCase().replace(/[^A-Z]/g, ''))}
+          onKeyDown={onEnter(v => { const c = v.toUpperCase().replace(/[^A-Z]/g, ''); if (name.trim() && c.length === 4) join(name, c); })} />
         <button className="btn" disabled={!name.trim() || code.length !== 4}>Join Room</button>
       </form>
     </div>
@@ -414,7 +488,8 @@ function AnswerBox({ open, wordKey, wrongAt, onSubmit, onType, voice, placeholde
   useEffect(() => { if (wrongAt) input.current?.select(); }, [wrongAt]);
   useEffect(() => () => rec.current?.abort(), []);
 
-  const submit = e => { e.preventDefault(); if (open && text.trim()) onSubmit(text); };
+  const send = value => { if (open && value.trim()) onSubmit(value); };
+  const submit = e => { e.preventDefault(); send(input.current?.value ?? text); };
   const listen = () => {
     if (listening) return rec.current?.stop();
     const r = new Recognition();
@@ -441,14 +516,14 @@ function AnswerBox({ open, wordKey, wrongAt, onSubmit, onType, voice, placeholde
   return (
     <div className="answer-wrap">
       <form className="answer" onSubmit={submit}>
-        <input ref={input} autoFocus value={text} disabled={!open} placeholder={placeholder}
-          onChange={e => { setText(e.target.value); onType(); }}
+        <input ref={input} autoFocus value={text} disabled={!open} placeholder={placeholder} enterKeyHint="send"
+          onChange={e => { setText(e.target.value); onType(); }} onKeyDown={onEnter(send)}
           autoComplete="off" autoCapitalize="characters" spellCheck={false} />
         {canVoice && (
           <button type="button" className={`btn mic ${listening ? 'on' : ''}`} disabled={!open} onClick={listen}
             aria-label={listening ? 'Stop listening' : 'Answer by voice'} title="Answer by voice">🎤</button>
         )}
-        <button className="btn primary" disabled={!open || !text.trim()}>Submit</button>
+        <button className="btn primary" disabled={!open}>Submit</button>
       </form>
       {voiceMsg && <small className="muted">{voiceMsg}</small>}
       {voice && !canVoice && (
@@ -526,7 +601,7 @@ function Game({ game, me, activity, actions }) {
 
       <main className="stage">
         {c.category && <div className="chip">{c.category}</div>}
-        {c.emoji && <div className="emoji-box" key={wordKey}><span>{c.emoji}</span></div>}
+        {c.emoji && <div className="emoji-box" key={wordKey}><span><Emoji char={c.emoji} /></span></div>}
         <p className="muted">
           {game.mode === 'picture' ? "What's in the picture?" : game.mode === 'letters' ? 'Fill in the missing letters' : ''}
         </p>
@@ -571,7 +646,7 @@ function Game({ game, me, activity, actions }) {
           <div className="card result">
             {multi && roundEnd && <div className="chip">Round {game.round} complete!</div>}
             <h2>{!first ? (info.overtime ? '⏭ Word skipped' : "⏰ Time's up!") : first.id === me ? '🎉 You got it first!' : `⚡ ${first.name} got it first!`}</h2>
-            <p className="answer-reveal">{c.emoji} {c.answer}</p>
+            <p className="answer-reveal"><Emoji char={c.emoji} /> {c.answer}</p>
             {c.solved.length > 0 && (
               <ul className="turn-points">
                 {c.solved.map((x, i) => <li key={x.id}><span>{MEDALS[i] ?? '✅'} {x.name}</span><b>+{x.points}</b></li>)}
@@ -626,9 +701,9 @@ function CategoriesGame({ game, me }) {
     clearTimeout(saveTimer.current);
     saveTimer.current = setTimeout(() => socket.emit('cat:answers', { answers: next }), 300);
   };
-  const finish = () => {
+  const finish = (list = answers) => {
     clearTimeout(saveTimer.current);
-    send('cat:answers', { answers, done: true }, res => { setDone(true); setPlace(res.place); });
+    send('cat:answers', { answers: list, done: true }, res => { setDone(true); setPlace(res.place); });
   };
   const ordinal = n => `${n}${['th', 'st', 'nd', 'rd'][n % 100 > 10 && n % 100 < 14 ? 0 : n % 10] ?? 'th'}`;
   // Everyone in the order the server ranked them (hand-in order; late drafts at the end)
@@ -657,8 +732,9 @@ function CategoriesGame({ game, me }) {
           <>
             <p className="muted center">Name a <b>{c.categories[0]}</b> starting with <b>{c.letter}</b>. ⚡ First come, first served: the first valid answer wins!</p>
             {/* One category per round; Enter = Done */}
-            <form className="answer" onSubmit={e => { e.preventDefault(); if (writing && !done) finish(); }}>
+            <form className="answer" onSubmit={e => { e.preventDefault(); if (writing && !done) finish(); }} noValidate>
               <input value={answers[0]} maxLength={30} disabled={!writing || done} autoFocus
+                onKeyDown={onEnter(v => { if (writing && !done) { change(0, v); finish([v]); } })}
                 placeholder={`${c.categories[0]} starting with ${c.letter}…`}
                 className={startsWith(answers[0], c.letter) ? '' : 'bad'} onChange={e => change(0, e.target.value)}
                 autoComplete="off" spellCheck={false} enterKeyHint="done" />
@@ -876,14 +952,15 @@ function DrawGame({ game, me }) {
     return () => { socket.off('draw-game:word', onWord); socket.off('draw-game:correct', onCorrect); };
   }, []);
 
-  const guess = e => {
-    e.preventDefault();
-    if (!text.trim()) return;
-    socket.emit('draw-game:guess', text, res => {
+  const guessInput = useRef(null);
+  const sendGuess = value => {
+    if (!canGuess || !value.trim()) return;
+    socket.emit('draw-game:guess', value, res => {
       if (res.correct) { setSecret({ word: res.word }); setText(''); }
       else if (!res.reason) { setWrong(Date.now()); setText(''); play('wrong'); buzz([30, 40, 30]); }
     });
   };
+  const guess = e => { e.preventDefault(); sendGuess(guessInput.current?.value ?? text); };
 
   const status = !relay
     ? (c.drawerId === me ? <span className="your-turn">🎨 YOUR TURN</span> : <>🎨 {c.drawerName} is drawing</>)
@@ -913,7 +990,7 @@ function DrawGame({ game, me }) {
           </div>
         )}
         {knowsWord && secret && open && (
-          <div className="secret">Your word: <b>{secret.emoji} {secret.word}</b>
+          <div className="secret">Your word: <b><Emoji char={secret.emoji} /> {secret.word}</b>
             <small>{relay ? "You start the drawing. The others won't know the word, so make your 15 s count!" : 'Draw it! No letters or numbers.'}</small>
           </div>
         )}
@@ -932,11 +1009,12 @@ function DrawGame({ game, me }) {
 
         {!knowsWord && (
           <form className={`answer ${now - wrong < 450 ? 'shake' : ''}`} onSubmit={guess}>
-            <input value={text} onChange={e => setText(e.target.value)} disabled={!canGuess} autoFocus
+            <input ref={guessInput} value={text} onChange={e => setText(e.target.value)} disabled={!canGuess} autoFocus
+              onKeyDown={onEnter(sendGuess)}
               placeholder={myGuess ? 'You got it! Waiting for the others…'
                 : relay && c.step === 'draw' ? 'Guessing opens after the last leg…' : 'What is being drawn?'}
               autoComplete="off" spellCheck={false} enterKeyHint="send" />
-            <button className="btn primary" disabled={!canGuess || !text.trim()}>Guess</button>
+            <button className="btn primary" disabled={!canGuess}>Guess</button>
           </form>
         )}
 
@@ -957,7 +1035,7 @@ function DrawGame({ game, me }) {
           <div className="card result">
             <h2>{c.guessed.length ? `🎉 ${c.guessed.length} ${c.guessed.length === 1 ? 'player' : 'players'} guessed it!` : '😶 Nobody guessed it'}</h2>
             <p className="muted">The word was</p>
-            <p className="answer-reveal">{c.emoji} {c.answer}</p>
+            <p className="answer-reveal"><Emoji char={c.emoji} /> {c.answer}</p>
             {relay && <p className="muted">Drawn by {c.chain.map(p => p.name).join(' → ')}</p>}
             <ul className="turn-points">
               {c.guessed.map(g => <li key={g.id}><span>{g.name}</span><b>+{g.points}</b></li>)}
@@ -1012,7 +1090,8 @@ function ImposterGame({ game, me }) {
     setError('');
     done?.(res);
   });
-  const submitText = event => e => { e.preventDefault(); if (text.trim()) send(event, text, () => setText('')); };
+  const sendText = event => value => { if (value.trim()) send(event, value, () => setText('')); };
+  const submitText = event => e => { e.preventDefault(); sendText(event)(e.currentTarget.querySelector('input')?.value ?? text); };
 
   const stepLabel = { clue: '💬 Clues', vote: '🗳️ Vote', guess: '🎯 Last chance', reveal: '🔍 Reveal' }[c.step];
 
@@ -1047,9 +1126,9 @@ function ImposterGame({ game, me }) {
 
         {c.step === 'clue' && (myTurn ? (
           <form className="answer" onSubmit={submitText('imposter:clue')}>
-            <input autoFocus maxLength={20} value={text} onChange={e => setText(e.target.value)}
+            <input autoFocus maxLength={20} value={text} onChange={e => setText(e.target.value)} onKeyDown={onEnter(sendText('imposter:clue'))}
               placeholder="Your one-word clue (not your word!)" autoComplete="off" spellCheck={false} enterKeyHint="send" />
-            <button className="btn primary" disabled={!text.trim()}>Send</button>
+            <button className="btn primary">Send</button>
           </form>
         ) : <p className="muted">Waiting for {nameOf(c.clueGiverId)}'s clue…</p>)}
 
@@ -1072,9 +1151,9 @@ function ImposterGame({ game, me }) {
           <>
             <div className="secret caught">🕵️ You were the odd one out! Guess the others' word to steal the round:</div>
             <form className="answer" onSubmit={submitText('imposter:guess')}>
-              <input autoFocus value={text} onChange={e => setText(e.target.value)} placeholder="Their word is…"
+              <input autoFocus value={text} onChange={e => setText(e.target.value)} onKeyDown={onEnter(sendText('imposter:guess'))} placeholder="Their word is…"
                 autoComplete="off" spellCheck={false} enterKeyHint="send" />
-              <button className="btn primary" disabled={!text.trim()}>Guess</button>
+              <button className="btn primary">Guess</button>
             </form>
           </>
         ) : <p className="caught-note">🕵️ <b>{c.imposterName}</b> was caught! They get one guess at your word…</p>)}
@@ -1114,7 +1193,7 @@ function ImposterGame({ game, me }) {
 // ---------------- End of game + room history ----------------
 
 function WordList({ items }) {
-  return <div className="guessed">{items.map(h => <span key={h.answer}>{h.emoji} {h.answer}</span>)}</div>;
+  return <div className="guessed">{items.map(h => <span key={h.answer}><Emoji char={h.emoji} /> {h.answer}</span>)}</div>;
 }
 
 const OUTCOME_SHORT = {
@@ -1157,7 +1236,7 @@ function Final({ game, me, actions }) {
       {(game.mode === 'draw' || game.mode === 'relay') && (
         <ul className="turn-summary">
           {game.history.map((h, i) => (
-            <li key={i}>{h.emoji} <b>{h.answer}</b> drawn by {h.drawerName}: {h.guessers.length ? `guessed by ${h.guessers.join(', ')}` : 'nobody got it'}</li>
+            <li key={i}><Emoji char={h.emoji} /> <b>{h.answer}</b> drawn by {h.drawerName}: {h.guessers.length ? `guessed by ${h.guessers.join(', ')}` : 'nobody got it'}</li>
           ))}
         </ul>
       )}
