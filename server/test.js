@@ -253,6 +253,162 @@ function newGame(mode, names = ['A', 'B']) {
   assert.ok(room.questions.every(q => !before.has(q.id)));
 }
 
+// Odd One Out word pairs: every word used once
+{
+  const { IMPOSTER_POOL } = await import('./imposterPairs.js');
+  const words = IMPOSTER_POOL.flatMap(q => [q.answer, q.alt]);
+  assert.ok(IMPOSTER_POOL.length >= 80, `only ${IMPOSTER_POOL.length} pairs`);
+  assert.equal(new Set(words).size, words.length, 'a word appears in two pairs');
+}
+
+function party(mode, names) {
+  const room = G.createRoom(mode.toUpperCase());
+  const ps = names.map(n => G.addPlayer(room, n));
+  ps.forEach(p => (p.connected = true));
+  assert.ok(G.setMode(room, mode));
+  return { room, ps };
+}
+
+// Relay Draw: chain of legs, only the starter knows the word, no guessing until the end, no clearing
+{
+  const { room, ps: [a, b, c] } = party('relay', ['A', 'B', 'C']);
+  G.setRounds(room, 3);
+  G.startGame(room);
+  assert.equal(room.questions.length, 3);
+  let cur = room.current;
+  assert.deepEqual(cur.chain, [a.id, b.id, c.id]);
+  const word = cur.q.answer;
+  assert.equal(G.drawSync(room, a.id).word, word, 'starter knows');
+  assert.equal(G.drawSync(room, b.id).word, null, 'next drawer must not know');
+  assert.ok(!JSON.stringify(G.publicState(room)).includes(word), 'word leaked');
+
+  const seg = { x: 0.5, y: 0.5, px: 0.4, py: 0.4, w: 0.01, c: '#000000', t: 'pen' };
+  assert.ok(G.addStrokes(room, a.id, [seg]), 'leg 1: A draws');
+  assert.equal(G.addStrokes(room, b.id, [seg]), null, 'B waits for their leg');
+  assert.equal(G.clearStrokes(room, a.id), false, 'no clearing in relay');
+  assert.equal(G.submitDrawGuess(room, b.id, word).reason, 'closed', 'no guessing while drawing');
+
+  assert.equal(G.wordTimeUp(room), false); // leg 1 over -> B
+  assert.equal(cur.drawerId, b.id);
+  assert.ok(G.addStrokes(room, b.id, [seg]));
+  // C disconnects before their leg: B's leg ends -> C skipped -> guessing
+  c.connected = false;
+  assert.equal(G.wordTimeUp(room), false);
+  assert.equal(cur.step, 'guess');
+  assert.equal(cur.drawerId, null);
+  assert.equal(G.addStrokes(room, b.id, [seg]), null, 'no drawing while guessing');
+  assert.equal(G.submitDrawGuess(room, a.id, word).reason, 'drawer', 'starter cannot guess');
+  const r = G.submitDrawGuess(room, b.id, word);
+  assert.equal(r.points, 100);
+  assert.equal(r.ended, true, 'only connected guesser got it -> round over');
+  assert.equal(cur.drawerPoints, 100);
+  assert.equal(room.history[0].drawerName, 'A → B → C');
+  c.connected = true;
+
+  // Round 2 starts with B; the starter gone mid-leg moves to the next leg
+  assert.ok(G.advance(room));
+  cur = room.current;
+  assert.deepEqual(cur.chain, [b.id, c.id, a.id]);
+  b.connected = false;
+  assert.equal(G.playerGone(room, b.id), false);
+  assert.equal(cur.drawerId, c.id);
+  b.connected = true;
+  // Guess timer runs out -> round ends
+  G.wordTimeUp(room); // C's leg -> A
+  G.wordTimeUp(room); // A's leg -> guessing
+  assert.equal(cur.step, 'guess');
+  assert.equal(G.wordTimeUp(room), true);
+  assert.equal(room.phase, 'result');
+}
+
+// Odd One Out: secret words, clue rules, vote outcomes, last guess, scoring, departures
+{
+  const { room, ps } = party('imposter', ['A', 'B', 'C', 'D']);
+  assert.equal(G.publicState(room).minPlayers, 3);
+  G.setRounds(room, 4);
+  G.startGame(room);
+  assert.equal(room.questions.length, 4);
+  const byId = id => ps.find(p => p.id === id);
+  const playRound = () => {
+    const c = room.current;
+    const imp = byId(c.imposterId);
+    const crew = ps.filter(p => p !== imp);
+    return { c, imp, crew };
+  };
+
+  // Round 1: words are private and differ only for the imposter
+  let { c, imp, crew } = playRound();
+  assert.notEqual(c.crewWord, c.impWord);
+  for (const p of crew) assert.equal(G.wordFor(room, p.id), c.crewWord);
+  assert.equal(G.wordFor(room, imp.id), c.impWord);
+  const pub = JSON.stringify(G.publicState(room));
+  assert.ok(!pub.includes(c.crewWord) && !pub.includes(c.impWord), 'a word leaked');
+  assert.equal(G.publicState(room).current.imposterId, null, 'imposter revealed early');
+
+  // Clues: in order, one word, can't contain your word
+  const giver = () => c.clueOrder[c.clueIdx];
+  const notGiver = ps.find(p => p.id !== giver());
+  assert.equal(G.submitClue(room, notGiver.id, 'hello').ok, false);
+  assert.equal(G.submitClue(room, giver(), 'two words').ok, false);
+  assert.equal(G.submitClue(room, giver(), G.wordFor(room, giver()).toLowerCase() + 's').ok, false);
+  assert.ok(G.submitClue(room, giver(), 'tasty').ok);
+  assert.equal(G.wordTimeUp(room), false); // 2nd clue-giver ran out of time
+  assert.equal(c.clues[1].text, null);
+  while (c.step === 'clue') assert.ok(G.submitClue(room, giver(), 'thing').ok);
+  assert.equal(c.step, 'vote');
+
+  // Vote: no self-votes; everyone votes the imposter -> caught -> last guess; wrong guess -> crew wins
+  assert.equal(G.submitVote(room, crew[0].id, crew[0].id).ok, false);
+  assert.equal(G.publicState(room).current.votes, null, 'votes visible before counting');
+  for (const p of crew) assert.ok(G.submitVote(room, p.id, imp.id).ok);
+  const last = G.submitVote(room, imp.id, crew[0].id);
+  assert.equal(last.ended, false, 'caught -> guess step, not over yet');
+  assert.equal(c.step, 'guess');
+  assert.equal(G.publicState(room).current.imposterId, imp.id, 'caught imposter is revealed for the last guess');
+  assert.equal(G.publicState(room).current.crewWord, null, "crew word not revealed during the imposter's guess");
+  assert.equal(G.submitImposterGuess(room, crew[0].id, 'x').ok, false);
+  assert.equal(G.submitImposterGuess(room, imp.id, 'zzzz').correct, false);
+  assert.equal(c.outcome, 'crew-won');
+  for (const p of crew) assert.equal(p.score, G.CREW_WIN + G.GOOD_VOTE);
+  assert.equal(imp.score, 0);
+  assert.equal(G.publicState(room).current.crewWord, c.crewWord);
+
+  // Round 2: caught but guesses the crew word -> imposter +2
+  assert.ok(G.advance(room));
+  ({ c, imp, crew } = playRound());
+  while (c.step === 'clue') G.wordTimeUp(room);
+  for (const p of ps) G.submitVote(room, p.id, p === imp ? crew[0].id : imp.id);
+  const before = imp.score;
+  assert.equal(G.submitImposterGuess(room, imp.id, ' the ' + c.crewWord.toLowerCase()).correct, true);
+  assert.equal(c.outcome, 'imposter-guessed');
+  assert.equal(imp.score, before + G.IMPOSTER_STEALS);
+
+  // Round 3: tie vote (2-2) -> nobody caught -> imposter escapes +3; vote timer counts partial votes
+  assert.ok(G.advance(room));
+  ({ c, imp, crew } = playRound());
+  while (c.step === 'clue') G.wordTimeUp(room);
+  G.submitVote(room, crew[0].id, crew[1].id);
+  G.submitVote(room, crew[1].id, crew[0].id);
+  G.submitVote(room, imp.id, crew[0].id);
+  G.submitVote(room, crew[2].id, crew[1].id);
+  assert.equal(c.accusedId, null);
+  assert.equal(c.outcome, 'imposter-escaped');
+  assert.equal(G.publicState(room).current.imposterId, imp.id, 'revealed at the end');
+
+  // Round 4: the imposter leaves the room mid-clues -> round ends, no points
+  assert.ok(G.advance(room));
+  ({ c, imp } = playRound());
+  const scores = ps.map(p => p.score);
+  room.players = room.players.filter(p => p !== imp);
+  assert.equal(G.playerGone(room, imp.id), true);
+  assert.equal(c.outcome, 'imposter-left');
+  assert.deepEqual(ps.map(p => p.score), scores);
+  assert.equal(G.advance(room), false, 'game over after 4 rounds');
+
+  // Everyone was imposter once in 4 rounds of 4 players (shuffled order, no repeats)
+  assert.equal(new Set(room.history.map(h => h.imposterName)).size, 4);
+}
+
 // Room records + leaderboard across games (by name): ties give both a win, all-zero gives none
 {
   const room = G.createRoom('LEAD');

@@ -16,7 +16,8 @@ function client(name) {
   s.on('draw-game:stroke', segs => (c.strokes += segs.length));
   s.on('draw-game:clear', () => c.clears++);
   // every event a player receives from the room, to prove the secret never goes out to guessers
-  s.onAny((ev, payload) => { if (ev !== 'draw-game:word') c.publicPayloads.push(JSON.stringify(payload ?? null)); });
+  // private, per-socket messages are excluded on purpose: they're meant for this player only
+  s.onAny((ev, payload) => { if (!['draw-game:word', 'imposter:word'].includes(ev)) c.publicPayloads.push(`${ev} ${JSON.stringify(payload ?? null)}`); });
   c.emit = (ev, ...args) => new Promise(res => s.emit(ev, ...args, res));
   return c;
 }
@@ -159,6 +160,88 @@ p2.s.emit('hint');
 await until(() => p1.state.current.hint);
 console.log('picture mode: hint shown after both players asked:', p1.state.current.hint);
 assert.equal((await p2.emit('answer', ['wrong', 'also wrong'])).correct, false);
+
+// ---- Odd One Out with 4 players: private words, clues, vote, last guess ----
+const imp = ['Ivy', 'Jon', 'Kai', 'Lu'].map(client);
+await until(() => imp.every(p => p.s.connected));
+const words = new Map(); // client -> their secret word
+for (const p of imp) p.s.on('imposter:word', w => words.set(p, w.word));
+const room3 = (await imp[0].emit('create', { name: 'Ivy' })).code;
+for (const p of imp.slice(1)) await p.emit('join', { code: room3, name: p.name });
+assert.ok((await imp[0].emit('setMode', 'imposter')).ok);
+assert.ok((await imp[0].emit('setRounds', 1)).ok);
+assert.ok((await imp[0].emit('start')).ok);
+await until(() => words.size === 4);
+const counts = {};
+for (const w of words.values()) counts[w] = (counts[w] ?? 0) + 1;
+assert.deepEqual(Object.values(counts).sort(), [1, 3], 'exactly one player should have a different word');
+const impWord = Object.keys(counts).find(w => counts[w] === 1);
+const crewWord = Object.keys(counts).find(w => counts[w] === 3);
+const imposterClient = imp.find(p => words.get(p) === impWord);
+for (const p of imp) for (const x of p.publicPayloads) assert.ok(!x.includes(`"${crewWord}"`) && !x.includes(`"${impWord}"`), `pair leaked to the room: ${x.slice(0, 300)}`);
+assert.deepEqual((await imp[1].emit('imposter:sync', null)).word, words.get(imp[1]));
+
+// Clues in the server's order; the first try uses the player's own word and is rejected
+const st = () => imp[0].state.current;
+let first = true;
+while (st().step === 'clue') {
+  const giver = imp.find(p => p.state.players.find(x => x.id === st().clueGiverId)?.name === p.name);
+  if (first) {
+    assert.equal((await giver.emit('imposter:clue', words.get(giver))).ok, false);
+    first = false;
+  }
+  assert.ok((await giver.emit('imposter:clue', `clue${imp.indexOf(giver)}`)).ok);
+  await until(() => st().clues.length > 0 && (st().step !== 'clue' || st().clues.at(-1).text === `clue${imp.indexOf(giver)}`));
+}
+assert.equal(st().step, 'vote');
+const idOf = p => p.state.players.find(x => x.name === p.name).id;
+// Crew all vote for the imposter; the imposter votes for someone else -> caught -> last guess
+for (const p of imp.filter(p => p !== imposterClient)) assert.ok((await p.emit('imposter:vote', idOf(imposterClient))).ok);
+assert.equal(imp[0].state.current.votes, null, 'votes shown before everyone voted');
+assert.ok((await imposterClient.emit('imposter:vote', idOf(imp.find(p => p !== imposterClient)))).ok);
+await until(() => st().step === 'guess');
+assert.equal(st().imposterName, imposterClient.name);
+assert.equal(st().crewWord, null, 'crew word revealed before the last guess');
+assert.ok((await imposterClient.emit('imposter:guess', crewWord.toLowerCase())).ok);
+await until(() => imp[0].state.phase === 'result');
+assert.equal(st().outcome, 'imposter-guessed');
+assert.equal(st().crewWord, crewWord);
+console.log(`odd one out: ${imposterClient.name} had "${impWord}" vs "${crewWord}", was caught, guessed the word -> +2`);
+await until(() => imp[0].state.phase === 'final', 8000);
+for (const p of imp) p.s.disconnect();
+
+// ---- Relay Draw with 3 players: only the starter knows, legs pass the pen, guessing at the end ----
+const rel = ['Mo', 'Ned', 'Ola'].map(client);
+await until(() => rel.every(p => p.s.connected));
+const room4 = (await rel[0].emit('create', { name: 'Mo' })).code;
+for (const p of rel.slice(1)) await p.emit('join', { code: room4, name: p.name });
+assert.ok((await rel[0].emit('setMode', 'relay')).ok);
+assert.ok((await rel[0].emit('setRounds', 1)).ok);
+assert.ok((await rel[0].emit('start')).ok);
+await until(() => rel[0].state?.phase === 'round');
+const cur = () => rel[0].state.current;
+const relayWord = (await until(() => rel[0].words.length === 1), rel[0].words[0]); // Mo starts round 1
+assert.ok(rel.slice(1).every(p => p.words.length === 0), 'non-starter was told the word');
+assert.equal((await rel[1].emit('draw-game:sync', null)).word, null);
+const seg = { x: 0.5, y: 0.5, px: 0.4, py: 0.4, w: 0.01, c: '#000000', t: 'pen' };
+rel[1].s.emit('draw-game:stroke', [seg]); // not Ned's leg yet: ignored
+rel[0].s.emit('draw-game:stroke', [seg]);
+await until(() => rel[1].strokes === 1);
+assert.equal((await rel[1].emit('draw-game:guess', relayWord)).reason, 'closed', 'guessing before the legs are done');
+console.log('relay: waiting for 3 legs of 15 s…');
+await until(() => cur().drawerId && cur().leg === 1, 20000);
+rel[1].s.emit('draw-game:stroke', [seg]); // Ned's leg now
+await until(() => rel[2].strokes === 2);
+await until(() => cur().step === 'guess', 40000);
+assert.equal((await rel[0].emit('draw-game:guess', relayWord)).reason, 'drawer', 'starter cannot guess');
+const rg1 = await rel[2].emit('draw-game:guess', relayWord);
+assert.equal(rg1.points, 100);
+const rg2 = await rel[1].emit('draw-game:guess', relayWord.toLowerCase());
+assert.equal(rg2.ended, true);
+await until(() => rel[0].state.phase === 'result');
+assert.equal(cur().answer, relayWord);
+console.log(`relay: "${relayWord}" drawn by ${cur().chain.map(p => p.name).join(' → ')}; guessed by both, starter +${cur().drawerPoints}`);
+for (const p of rel) p.s.disconnect();
 
 for (const p of [...players, p1, p2]) p.s.disconnect();
 console.log('\nE2E OK');

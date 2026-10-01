@@ -47,9 +47,21 @@ function schedule(room, ms, fn) {
   room.timer = setTimeout(() => { fn(); broadcast(room); }, ms);
 }
 function beginWord(room) {
-  // Picture/Letters: time-up pauses the word (overtime) until solved or skipped. Classic, Draw & Guess: time-up ends it.
-  schedule(room, G.modeOf(room).wordMs, () => { if (G.wordTimeUp(room)) afterWord(room); });
+  armRoundTimer(room);
   sendSecret(room);
+}
+// Fires at the current deadline. Picture/Letters: time-up pauses the word (overtime). Classic, Draw & Guess: ends it.
+// Relay / Odd One Out: moves to the next leg or step, which sets a new deadline, so the timer is armed again.
+function armRoundTimer(room) {
+  schedule(room, room.phaseEndsAt - Date.now(), () => {
+    if (G.wordTimeUp(room)) afterWord(room);
+    else if (room.phase === 'round' && room.phaseEndsAt > Date.now()) armRoundTimer(room);
+  });
+}
+// After a player action or a departure that may have ended the round or moved it to its next step.
+function settle(room, ended) {
+  if (ended) afterWord(room);
+  else if (room.phase === 'round') armRoundTimer(room);
 }
 function afterWord(room) {
   schedule(room, room.phaseEndsAt - Date.now(), () => {
@@ -58,19 +70,25 @@ function afterWord(room) {
   });
 }
 
-// Draw & Guess: the secret word goes to the drawer's socket only, never to the room.
+// Secret words go to individual sockets only, never to the room:
+// Draw & Guess -> the drawer, Relay -> the starting drawer, Odd One Out -> every player their own word.
 function sendSecret(room) {
-  if (!G.isDraw(room) || room.phase !== 'round') return;
-  const drawer = room.players.find(p => p.id === room.current.drawerId);
-  if (drawer?.socketId) {
-    const { word, emoji } = G.drawSync(room, drawer.id);
-    io.to(drawer.socketId).emit('draw-game:word', { word, emoji, drawerId: drawer.id, round: room.wordNo });
+  if (room.phase !== 'round') return;
+  if (room.mode === 'imposter') {
+    for (const p of room.players) if (p.socketId) io.to(p.socketId).emit('imposter:word', { word: G.wordFor(room, p.id), round: room.wordNo });
+    return;
+  }
+  if (!G.usesCanvas(room)) return;
+  const knower = room.players.find(p => p.id === (G.isRelay(room) ? room.current.starterId : room.current.drawerId));
+  if (knower?.socketId) {
+    const { word, emoji } = G.drawSync(room, knower.id);
+    io.to(knower.socketId).emit('draw-game:word', { word, emoji, drawerId: knower.id, round: room.wordNo });
   }
 }
 
-// A player dropped or left mid-turn: end the turn if they were drawing, or if everyone left has already guessed.
+// A player dropped or left mid-round: the mode decides (end a drawer's turn, skip their leg/clue, recount votes...).
 function playerGone(room, playerId) {
-  if (G.drawerGone(room, playerId) || G.checkAllGuessed(room)) afterWord(room);
+  if (room.phase === 'round') settle(room, G.playerGone(room, playerId));
 }
 
 // --- connection bookkeeping ---
@@ -94,8 +112,8 @@ function removePlayer(room, playerId, message) {
   room.players = room.players.filter(p => p !== player);
   if (!room.players.length) { clearTimeout(room.timer); rooms.delete(room.code); return; }
   if (room.hostId === playerId) room.hostId = room.players[0].id;
-  // A game carries on while at least 2 players are left; below that, back to the lobby.
-  if (room.phase !== 'lobby' && room.players.length < G.MIN_PLAYERS) { clearTimeout(room.timer); G.toLobby(room); }
+  // A game carries on while enough players are left for the mode (2, or 3 for Odd One Out); otherwise back to the lobby.
+  if (room.phase !== 'lobby' && room.players.length < G.minPlayersFor(room)) { clearTimeout(room.timer); G.toLobby(room); }
   else if (room.phase !== 'lobby') {
     G.checkHint(room); // the leaver may have been the last one not asking for a hint
     playerGone(room, playerId);
@@ -112,7 +130,7 @@ function leaveCurrent(socket) {
 }
 
 function canStart(room) {
-  return room.players.length >= G.MIN_PLAYERS && room.players.every(p => p.connected);
+  return room.players.length >= G.minPlayersFor(room) && room.players.every(p => p.connected);
 }
 
 io.on('connection', socket => {
@@ -165,7 +183,7 @@ io.on('connection', socket => {
     if (!room) return cb({ ok: false, error: 'You are not in a room.' });
     if (hostOnly && room.hostId !== player.id) return cb({ ok: false, error: 'Only the host can start.' });
     if (!['lobby', 'final'].includes(room.phase)) return cb({ ok: false, error: 'Game already running.' });
-    if (!canStart(room)) return cb({ ok: false, error: 'Need at least 2 players, all connected.' });
+    if (!canStart(room)) return cb({ ok: false, error: `${G.modeOf(room).name} needs at least ${G.minPlayersFor(room)} players, all connected.` });
     G.startGame(room);
     beginWord(room);
     cb({ ok: true });
@@ -237,6 +255,23 @@ io.on('connection', socket => {
   socket.on('draw-game:clear', () => {
     const { room, player } = lookup(socket);
     if (player && G.clearStrokes(room, player.id)) socket.to(room.code).emit('draw-game:clear');
+  });
+
+  // --- Odd One Out ---
+  const imposterAction = fn => (arg, cb = () => {}) => {
+    const { room, player } = lookup(socket);
+    if (!player) return cb({ ok: false, error: 'You are not in a game.' });
+    const result = fn(room, player.id, arg);
+    cb(result);
+    if (result.ok) { settle(room, result.ended); broadcast(room); }
+  };
+  socket.on('imposter:clue', imposterAction(G.submitClue));
+  socket.on('imposter:vote', imposterAction(G.submitVote));
+  socket.on('imposter:guess', imposterAction(G.submitImposterGuess));
+  // Your own word, for a player who just (re)loaded the round.
+  socket.on('imposter:sync', (_, cb = () => {}) => {
+    const { room, player } = lookup(socket);
+    cb({ word: player ? G.wordFor(room, player.id) : null });
   });
 
   // Canvas + (if allowed) the secret word, for a player who just (re)loaded the turn.

@@ -16,7 +16,10 @@ const MODE_CARDS = [
   { key: 'letters', icon: '🔤', name: 'Letters', desc: 'No picture. Fill in the missing letters, harder every round.' },
   { key: 'classic', icon: '⚡', name: 'Classic', desc: 'Picture, hint and missing letters. 4 quick rounds.' },
   { key: 'draw', icon: '🎨', name: 'Draw & Guess', desc: 'Take turns drawing a secret word while the others guess.' },
+  { key: 'relay', icon: '🏃', name: 'Relay Draw', desc: 'Only the first artist knows the word; everyone adds a 15 s leg, then all guess.' },
+  { key: 'imposter', icon: '🕵️', name: 'Odd One Out', desc: 'One player has a different word. Give clues, vote out the imposter. 3+ players.' },
 ];
+const POINTS_MODES = ['draw', 'relay', 'imposter'];
 const MODE_ICON = Object.fromEntries(MODE_CARDS.map(m => [m.key, m.icon]));
 const Recognition = window.SpeechRecognition || window.webkitSpeechRecognition;
 
@@ -89,7 +92,8 @@ export default function App() {
   if (!game) screen = <Home onEnter={entered} />;
   else if (game.phase === 'lobby') screen = <Lobby game={game} me={me} lanIps={lanIps} actions={actions} />;
   else if (game.phase === 'final') screen = <Final game={game} me={me} actions={actions} />;
-  else if (game.mode === 'draw') screen = <DrawGame key={game.round} game={game} me={me} />;
+  else if (game.mode === 'draw' || game.mode === 'relay') screen = <DrawGame key={game.round} game={game} me={me} />;
+  else if (game.mode === 'imposter') screen = <ImposterGame key={game.round} game={game} me={me} />;
   else screen = <Game game={game} me={me} activity={activity} actions={actions} />;
 
   return (
@@ -165,6 +169,8 @@ function RoundsInput({ game, isHost, actions }) {
   const per = game.modeInfo.wordsPerRound;
   const summary = game.mode === 'draw'
     ? `each player draws ${n === 1 ? 'once' : `${n} times`} → ${n * game.players.length} turns`
+    : game.mode === 'relay' ? `${n} ${n === 1 ? 'drawing' : 'drawings'}, each passed through every player`
+    : game.mode === 'imposter' ? `${n} ${n === 1 ? 'round' : 'rounds'}, a new word pair and imposter each time`
     : per > 1 ? `${n} × ${per} words = ${n * per} words` : `${n} ${n === 1 ? 'word' : 'words'}`;
   return (
     <div className="rounds">
@@ -221,7 +227,8 @@ function Lobby({ game, me, lanIps, actions }) {
       <ModePicker game={game} isHost={isHost} actions={actions} />
       {isHost
         ? <button className="btn primary" disabled={!ready} onClick={actions.start}>
-            {ready ? `Start ${MODE_ICON[game.mode]} ${game.modeInfo.name}` : 'Waiting for players…'}
+            {ready ? `Start ${MODE_ICON[game.mode]} ${game.modeInfo.name}`
+              : n < game.minPlayers ? `${game.modeInfo.name} needs ${game.minPlayers}+ players` : 'Waiting for players…'}
           </button>
         : <p className="muted center">Waiting for the host to start…</p>}
       <Leaderboard game={game} me={me} />
@@ -485,7 +492,7 @@ const COLORS = ['#1a1040', '#ff5d6c', '#ff9f1c', '#ffcb3d', '#3ddc97', '#3b82f6'
 const clamp01 = v => Math.min(1, Math.max(0, v));
 
 // Strokes travel as small segments in 0..1 coordinates ({x, y, px, py, w, c, t}), batched ~30 times a second.
-function DrawCanvas({ canDraw, initial }) {
+function DrawCanvas({ canDraw, initial, allowClear = true }) {
   const canvas = useRef(null);
   const last = useRef(null);
   const queue = useRef([]);
@@ -565,7 +572,7 @@ function DrawCanvas({ canDraw, initial }) {
           </div>
           <div className="tool-group">
             <button className={`tool text ${tool === 'eraser' ? 'on' : ''}`} onClick={() => setTool('eraser')}>🧽 Eraser</button>
-            <button className="tool text" onClick={clear}>🗑️ Clear</button>
+            {allowClear && <button className="tool text" onClick={clear}>🗑️ Clear</button>}
           </div>
         </div>
       )}
@@ -573,21 +580,29 @@ function DrawCanvas({ canDraw, initial }) {
   );
 }
 
+// Draw & Guess and Relay Draw share this screen.
+// Draw & Guess: one drawer knows the word, everyone else guesses while they draw.
+// Relay: the pen passes along a chain in 15 s legs; only the starter knows the word; guessing opens after the last leg.
 function DrawGame({ game, me }) {
   const now = useNow();
   const c = game.current;
   const open = game.phase === 'round';
-  const isDrawer = c.drawerId === me;
-  const [secret, setSecret] = useState(null); // { word, emoji }: only the drawer, or me once I've guessed it
+  const relay = game.mode === 'relay';
+  const drawingStep = !relay || c.step === 'draw';
+  const isDrawer = open && drawingStep && c.drawerId === me; // holds the pen right now
+  const knowsWord = relay ? c.starterId === me : c.drawerId === me; // was told the word
+  const [secret, setSecret] = useState(null); // { word, emoji }: only the drawer/starter, or me once I've guessed it
   const [initial, setInitial] = useState(null);
   const [text, setText] = useState('');
   const [wrong, setWrong] = useState(0);
   const [cheer, setCheer] = useState(null);
   const secs = Math.max(0, Math.ceil((game.endsAt - now) / 1000));
-  const pct = open ? Math.max(0, (game.endsAt - now) / game.modeInfo.wordMs) * 100 : 0;
+  const stepMs = relay ? c.stepMs : game.modeInfo.wordMs;
+  const pct = open ? Math.max(0, (game.endsAt - now) / stepMs) * 100 : 0;
   const myGuess = c.guessed.find(g => g.id === me);
+  const canGuess = open && !knowsWord && !myGuess && (!relay || c.step === 'guess');
 
-  // This component is keyed by turn, so this runs once per turn (and after a refresh/reconnect).
+  // This component is keyed by turn/round, so this runs once per turn (and after a refresh/reconnect).
   useEffect(() => {
     socket.emit('draw-game:sync', null, res => {
       setInitial(res.strokes);
@@ -609,48 +624,72 @@ function DrawGame({ game, me }) {
     });
   };
 
-  const drawerPlayer = game.players.find(p => p.id === c.drawerId);
+  const status = !relay
+    ? (c.drawerId === me ? <span className="your-turn">🎨 YOUR TURN</span> : <>🎨 {c.drawerName} is drawing</>)
+    : c.step === 'guess' ? <span className="your-turn">🤔 Everyone guess!</span>
+    : isDrawer ? <span className="your-turn">🏃 YOUR LEG</span>
+    : <>🏃 {c.drawerName} is drawing · leg {c.leg + 1}/{c.chain.length}</>;
 
   return (
     <div className="game draw-game">
       <header className="topbar">
         <div className="round">
-          Turn <b>{game.round}</b> / {game.modeInfo.rounds}
-          <small>{isDrawer ? <span className="your-turn">🎨 YOUR TURN</span> : <>🎨 {c.drawerName} is drawing</>}</small>
+          {relay ? 'Round' : 'Turn'} <b>{game.round}</b> / {game.modeInfo.rounds}
+          <small>{status}</small>
         </div>
-        <div className={`timer ${open && secs <= 10 ? 'urgent' : ''}`}>{open ? clock(secs) : '–'}</div>
+        <div className={`timer ${open && secs <= (relay ? 5 : 10) ? 'urgent' : ''}`}>{open ? clock(secs) : '–'}</div>
         <Scores game={game} me={me} />
       </header>
       <div className="timebar"><div style={{ width: `${pct}%` }} /></div>
 
       <main className="draw-stage">
-        {isDrawer && secret && (
-          <div className="secret">Your word: <b>{secret.emoji} {secret.word}</b><small>Draw it! No letters or numbers.</small></div>
+        {relay && (
+          <div className="chain" aria-label="Drawing order">
+            {c.chain.map((p, i) => (
+              <span key={p.id} className={c.step === 'draw' && i === c.leg ? 'on' : i < c.leg || c.step === 'guess' ? 'done' : ''}>
+                {i === 0 && '⭐ '}{p.name}{p.id === me && ' (you)'}
+              </span>
+            ))}
+          </div>
         )}
-        {!isDrawer && myGuess && secret && (
+        {knowsWord && secret && open && (
+          <div className="secret">Your word: <b>{secret.emoji} {secret.word}</b>
+            <small>{relay ? "You start the drawing. The others won't know the word, so make your 15 s count!" : 'Draw it! No letters or numbers.'}</small>
+          </div>
+        )}
+        {relay && !knowsWord && open && c.step === 'draw' && (
+          <div className="secret">{isDrawer
+            ? <><b className="small-b">✏️ Your leg!</b><small>You don't know the word. Keep the drawing going!</small></>
+            : <small>Watch closely: you'll guess what it is after the last leg.</small>}
+          </div>
+        )}
+        {!knowsWord && myGuess && secret && (
           <div className="secret got-it">🎉 You guessed it! The word was <b>{secret.word}</b> (+{myGuess.points}). Keep watching!</div>
         )}
         {open && cheer && now - cheer.at < 2000 && <div className="cheer" key={cheer.at}>🎉 {cheer.name} guessed it!</div>}
 
-        <DrawCanvas canDraw={isDrawer && open} initial={initial} />
+        <DrawCanvas canDraw={isDrawer} initial={initial} allowClear={!relay} />
 
-        {!isDrawer && (
+        {!knowsWord && (
           <form className={`answer ${now - wrong < 450 ? 'shake' : ''}`} onSubmit={guess}>
-            <input value={text} onChange={e => setText(e.target.value)} disabled={!open || !!myGuess} autoFocus
-              placeholder={myGuess ? 'You got it! Waiting for the others…' : 'What is being drawn?'}
+            <input value={text} onChange={e => setText(e.target.value)} disabled={!canGuess} autoFocus
+              placeholder={myGuess ? 'You got it! Waiting for the others…'
+                : relay && c.step === 'draw' ? 'Guessing opens after the last leg…' : 'What is being drawn?'}
               autoComplete="off" spellCheck={false} enterKeyHint="send" />
-            <button className="btn primary" disabled={!open || !!myGuess || !text.trim()}>Guess</button>
+            <button className="btn primary" disabled={!canGuess || !text.trim()}>Guess</button>
           </form>
         )}
 
-        <ul className="feed">
-          {[...c.guesses].reverse().map((g, i) => (
-            <li key={c.guesses.length - i} className={g.correct ? 'ok' : ''}>
-              {g.correct ? <>🎉 <b>{g.name}</b> guessed it!</> : <>❌ <b>{g.name}</b>: {g.text}</>}
-            </li>
-          ))}
-          {!c.guesses.length && <li className="muted">{isDrawer ? 'Guesses will show up here.' : 'No guesses yet. Be the first!'}</li>}
-        </ul>
+        {(!relay || c.step === 'guess' || c.guesses.length > 0) && (
+          <ul className="feed">
+            {[...c.guesses].reverse().map((g, i) => (
+              <li key={c.guesses.length - i} className={g.correct ? 'ok' : ''}>
+                {g.correct ? <>🎉 <b>{g.name}</b> guessed it!</> : <>❌ <b>{g.name}</b>: {g.text}</>}
+              </li>
+            ))}
+            {!c.guesses.length && <li className="muted">{knowsWord ? 'Guesses will show up here.' : 'No guesses yet. Be the first!'}</li>}
+          </ul>
+        )}
       </main>
 
       {game.phase === 'result' && (
@@ -659,12 +698,153 @@ function DrawGame({ game, me }) {
             <h2>{c.guessed.length ? `🎉 ${c.guessed.length} ${c.guessed.length === 1 ? 'player' : 'players'} guessed it!` : '😶 Nobody guessed it'}</h2>
             <p className="muted">The word was</p>
             <p className="answer-reveal">{c.emoji} {c.answer}</p>
+            {relay && <p className="muted">Drawn by {c.chain.map(p => p.name).join(' → ')}</p>}
             <ul className="turn-points">
               {c.guessed.map(g => <li key={g.id}><span>{g.name}</span><b>+{g.points}</b></li>)}
-              <li className="drawer-line"><span>🎨 {drawerPlayer?.name ?? c.drawerName} (drawer)</span><b>+{c.drawerPoints}</b></li>
+              <li className="drawer-line">
+                <span>{relay ? `⭐ ${c.starterName} (started it)` : `🎨 ${c.drawerName} (drawer)`}</span><b>+{c.drawerPoints}</b>
+              </li>
             </ul>
             <Scores game={game} me={me} />
-            <p className="muted">{game.round < game.modeInfo.rounds ? `Next turn in ${secs}…` : `Final results in ${secs}…`}</p>
+            <p className="muted">{game.round < game.modeInfo.rounds ? `Next ${relay ? 'round' : 'turn'} in ${secs}…` : `Final results in ${secs}…`}</p>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ---------------- Odd One Out ----------------
+
+const OUTCOME = {
+  'crew-won': n => `🎉 Crew wins! ${n} was the odd one out`,
+  'imposter-guessed': n => `🕵️ ${n} was caught… but guessed the word!`,
+  'imposter-escaped': n => `🕵️ ${n} got away!`,
+  'imposter-left': n => `👋 ${n} (the odd one out) left the game`,
+};
+
+function ImposterGame({ game, me }) {
+  const now = useNow();
+  const c = game.current;
+  const open = game.phase === 'round';
+  const [word, setWord] = useState(null); // my own secret word
+  const [text, setText] = useState('');
+  const [error, setError] = useState('');
+  const [myVote, setMyVote] = useState(null);
+  const secs = Math.max(0, Math.ceil((game.endsAt - now) / 1000));
+  const pct = open ? Math.max(0, (game.endsAt - now) / c.stepMs) * 100 : 0;
+  const nameOf = id => game.players.find(p => p.id === id)?.name ?? 'Someone';
+  const myTurn = open && c.step === 'clue' && c.clueGiverId === me;
+  const caughtMe = open && c.step === 'guess' && c.imposterId === me;
+  const connected = game.players.filter(p => p.connected).length;
+
+  // Keyed by round: fetch my word once (also after a refresh) and take it from the round-start push.
+  useEffect(() => {
+    socket.emit('imposter:sync', null, r => setWord(r.word));
+    const onWord = w => setWord(w.word);
+    socket.on('imposter:word', onWord);
+    return () => socket.off('imposter:word', onWord);
+  }, []);
+  useEffect(() => { setText(''); setError(''); }, [c.step, c.clueGiverId]);
+
+  const send = (event, value, done) => socket.emit(event, value, res => {
+    if (!res.ok) return setError(res.error);
+    setError('');
+    done?.(res);
+  });
+  const submitText = event => e => { e.preventDefault(); if (text.trim()) send(event, text, () => setText('')); };
+
+  const stepLabel = { clue: '💬 Clues', vote: '🗳️ Vote', guess: '🎯 Last chance', reveal: '🔍 Reveal' }[c.step];
+
+  return (
+    <div className="game imposter-game">
+      <header className="topbar">
+        <div className="round">
+          Round <b>{game.round}</b> / {game.modeInfo.rounds}
+          <small>🕵️ Odd One Out · <span className="your-turn">{stepLabel}</span></small>
+        </div>
+        <div className={`timer ${open && secs <= 5 ? 'urgent' : ''}`}>{open ? clock(secs) : '–'}</div>
+        <Scores game={game} me={me} />
+      </header>
+      <div className="timebar"><div style={{ width: `${pct}%` }} /></div>
+
+      <main className="imposter-stage">
+        <div className="secret">Your word: <b>{word ?? '…'}</b>
+          <small>One player has a different word, and they don't know it's them. Could it be you? 🤫</small>
+        </div>
+
+        <ol className="clues">
+          {c.clueOrder.map(p => {
+            const given = c.clues.find(x => x.id === p.id);
+            const speaking = c.step === 'clue' && c.clueGiverId === p.id;
+            return (
+              <li key={p.id} className={speaking ? 'on' : ''}>
+                <b>{p.name}{p.id === me && ' (you)'}</b>
+                <span>{given ? (given.text ?? '— no clue') : speaking ? 'thinking…' : ''}</span>
+              </li>
+            );
+          })}
+        </ol>
+
+        {c.step === 'clue' && (myTurn ? (
+          <form className="answer" onSubmit={submitText('imposter:clue')}>
+            <input autoFocus maxLength={20} value={text} onChange={e => setText(e.target.value)}
+              placeholder="Your one-word clue (not your word!)" autoComplete="off" spellCheck={false} enterKeyHint="send" />
+            <button className="btn primary" disabled={!text.trim()}>Send</button>
+          </form>
+        ) : <p className="muted">Waiting for {nameOf(c.clueGiverId)}'s clue…</p>)}
+
+        {c.step === 'vote' && (
+          <div className="vote">
+            <p><b>Who has the different word?</b> <span className="muted">{c.voted.length}/{connected} voted</span></p>
+            <div className="vote-grid">
+              {game.players.filter(p => p.id !== me).map(p => (
+                <button key={p.id} className={`vote-btn ${myVote === p.id ? 'on' : ''}`} onClick={() => send('imposter:vote', p.id, () => setMyVote(p.id))}>
+                  {p.name}
+                  <small>{c.clues.filter(x => x.id === p.id).map(x => x.text ?? '—').join(', ')}</small>
+                </button>
+              ))}
+            </div>
+            <small className="muted">{myVote ? `You voted for ${nameOf(myVote)}. You can change it until everyone has voted.` : 'Tap a player to vote.'}</small>
+          </div>
+        )}
+
+        {c.step === 'guess' && (caughtMe ? (
+          <>
+            <div className="secret caught">🕵️ You were the odd one out! Guess the others' word to steal the round:</div>
+            <form className="answer" onSubmit={submitText('imposter:guess')}>
+              <input autoFocus value={text} onChange={e => setText(e.target.value)} placeholder="Their word is…"
+                autoComplete="off" spellCheck={false} enterKeyHint="send" />
+              <button className="btn primary" disabled={!text.trim()}>Guess</button>
+            </form>
+          </>
+        ) : <p className="caught-note">🕵️ <b>{c.imposterName}</b> was caught! They get one guess at your word…</p>)}
+
+        {error && <p className="bad-text">{error}</p>}
+      </main>
+
+      {game.phase === 'result' && (
+        <div className="overlay">
+          <div className="card result">
+            <h2>{OUTCOME[c.outcome]?.(c.imposterName)}</h2>
+            {c.outcome === 'imposter-escaped' && (
+              <p className="muted">{c.accusedId ? `${nameOf(c.accusedId)} was voted out instead.` : 'The vote was tied, so nobody was voted out.'}</p>
+            )}
+            <div className="pair">
+              <span>Crew word<b>{c.crewWord}</b></span>
+              <span>Odd one out<b>{c.impWord}</b></span>
+            </div>
+            {c.imposterGuess && <p className="muted">{c.imposterName} guessed “{c.imposterGuess}”</p>}
+            {c.votes?.length > 0 && (
+              <p className="votes-line">{c.votes.map(v => `${nameOf(v.from)} → ${nameOf(v.to)}`).join(' · ')}</p>
+            )}
+            {c.points && Object.keys(c.points).length > 0 && (
+              <ul className="turn-points">
+                {Object.entries(c.points).map(([id, n]) => <li key={id}><span>{nameOf(id)}</span><b>+{n}</b></li>)}
+              </ul>
+            )}
+            <Scores game={game} me={me} />
+            <p className="muted">{game.round < game.modeInfo.rounds ? `Next round in ${secs}…` : `Final results in ${secs}…`}</p>
           </div>
         </div>
       )}
@@ -678,48 +858,62 @@ function WordList({ items }) {
   return <div className="guessed">{items.map(h => <span key={h.answer}>{h.emoji} {h.answer}</span>)}</div>;
 }
 
+const OUTCOME_SHORT = {
+  'crew-won': 'caught',
+  'imposter-guessed': 'caught, but guessed the word',
+  'imposter-escaped': 'got away',
+  'imposter-left': 'left the game',
+};
+
 function Final({ game, me, actions }) {
-  const draw = game.mode === 'draw';
+  const points = POINTS_MODES.includes(game.mode);
   const ranked = [...game.players].sort((a, b) => b.score - a.score);
   const top = ranked.filter(p => p.score === ranked[0].score);
   const tie = top.length > 1;
   const medal = p => ['🥇', '🥈', '🥉'][ranked.filter(o => o.score > p.score).length] ?? '·';
   const ready = game.players.length >= game.minPlayers && game.players.every(p => p.connected);
   const isHost = game.hostId === me;
-  const skipped = game.history.filter(h => !draw && !h.winnerId);
+  const skipped = points ? [] : game.history.filter(h => !h.winnerId);
 
   return (
     <div className="card final wide">
-      {draw && <div className="chip">🎨 GAME OVER</div>}
+      {points && <div className="chip">{MODE_ICON[game.mode]} GAME OVER</div>}
       <div className="trophy">{tie ? '🤝' : '🏆'}</div>
       <h2>{tie ? "It's a tie!" : ranked[0].id === me ? 'You win!' : `${ranked[0].name} wins!`}</h2>
       {tie && <p className="muted center">{top.map(p => p.name).join(' & ')} share the top spot</p>}
       <ol className="podium">
         {ranked.map((p, i) => {
-          const words = draw ? [] : game.history.filter(h => h.winnerId === p.id);
+          const words = points ? [] : game.history.filter(h => h.winnerId === p.id);
           return (
             <li key={p.id} className={!tie && i === 0 ? 'first' : ''}>
               <div className="podium-row">
                 <span>{medal(p)} {p.name}{p.id === me && ' (you)'}</span>
-                <b>{draw ? `${p.score} pts` : `${words.length} ${words.length === 1 ? 'word' : 'words'}`}</b>
+                <b>{points ? `${p.score} pts` : `${words.length} ${words.length === 1 ? 'word' : 'words'}`}</b>
               </div>
               {words.length > 0 && <WordList items={words} />}
             </li>
           );
         })}
       </ol>
-      {draw && (
+      {(game.mode === 'draw' || game.mode === 'relay') && (
         <ul className="turn-summary">
           {game.history.map((h, i) => (
             <li key={i}>{h.emoji} <b>{h.answer}</b> drawn by {h.drawerName}: {h.guessers.length ? `guessed by ${h.guessers.join(', ')}` : 'nobody got it'}</li>
           ))}
         </ul>
       )}
+      {game.mode === 'imposter' && (
+        <ul className="turn-summary">
+          {game.history.map((h, i) => (
+            <li key={i}>🕵️ <b>{h.imposterName}</b> had <b>{h.impWord}</b> (crew: <b>{h.answer}</b>): {OUTCOME_SHORT[h.outcome]}</li>
+          ))}
+        </ul>
+      )}
       {skipped.length > 0 && (
         <div className="skipped"><small className="muted">Nobody got</small><WordList items={skipped} /></div>
       )}
-      <button className="btn primary" disabled={!ready} onClick={actions.again}>{ready ? 'Play Again' : 'Waiting for everyone to connect…'}</button>
-      <p className="muted center">Play Again deals brand-new {draw ? 'words to draw' : 'words'}.</p>
+      <button className="btn primary" disabled={!ready} onClick={actions.again}>{ready ? 'Play Again' : `Waiting for ${game.minPlayers}+ connected players…`}</button>
+      <p className="muted center">Play Again deals brand-new {game.mode === 'imposter' ? 'word pairs' : points ? 'words to draw' : 'words'}.</p>
       {isHost && <button className="btn" onClick={actions.lobby}>Back to lobby (change mode)</button>}
       <Leaderboard game={game} me={me} />
       <button className="btn ghost" onClick={actions.leave}>Leave room</button>

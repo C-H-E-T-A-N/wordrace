@@ -1,7 +1,7 @@
 # ⚡ Word Race
 
 A real-time multiplayer party game for **2–8 players** on phones and computers, either on the same Wi-Fi or online.
-One room, one lobby: the host picks one of four game modes.
+One room, one lobby: the host picks one of six game modes.
 
 | Mode | How it plays |
 |---|---|
@@ -9,6 +9,8 @@ One room, one lobby: the host picks one of four game modes.
 | 🔤 **Letters** | No picture, just the word with missing letters. Type straight into the empty boxes. Each round hides more letters (Easy → Medium → Hard), spread over however many rounds you play. 3 words per round. |
 | ⚡ **Classic** | Picture + hint + word with missing letters, type it in the box and Submit. 1 word per round, 30 s each; if time runs out nobody scores. |
 | 🎨 **Draw & Guess** | Pictionary. Players take turns drawing a secret word on a shared canvas while everyone else guesses. Points for fast guessers and for the drawer. |
+| 🏃 **Relay Draw** | Only the first artist sees the word. The drawing is passed around: everyone adds a 15 s leg without knowing what it is, then everyone guesses. |
+| 🕵️ **Odd One Out** | Everyone gets the same secret word except the imposter, who gets a related one (and doesn't know it). One-word clues, a vote, and a last guess. 3+ players. |
 
 **Rounds:** in the lobby the host sets how many rounds the selected mode has (each mode remembers its own):
 
@@ -18,6 +20,8 @@ One room, one lobby: the host picks one of four game modes.
 | Letters | 3 | 1–10 | 3 words |
 | Classic | 4 | 1–10 | 1 word |
 | Draw & Guess | 1 | 1–5 | every player draws once |
+| Relay Draw | 3 | 1–8 | one word, passed through every player |
+| Odd One Out | 3 | 1–8 | one word pair, a new imposter |
 
 In Picture and Letters, a word doesn't skip when its 15 s run out: it pauses (⏸) so everyone can keep guessing,
 and the host may skip it. Every finished game is saved to the room's **leaderboard** (wins, games, words guessed,
@@ -86,6 +90,28 @@ Scoring: 1st correct guesser **+100**, 2nd **+75**, 3rd **+50**, later ones less
 in proportion to how many guessers got it. If the drawer disconnects, their turn ends at once and the next player draws;
 a player who is away when their turn comes up is skipped.
 
+### Relay Draw
+
+1. Each round one player **starts**: only they see the word (⭐ in the drawing order shown on screen).
+2. The pen passes along every connected player in **15 s legs**: everyone keeps drawing on the same canvas
+   without knowing the word. There's no Clear button, so nobody can wipe the others' work (the eraser still works).
+3. After the last leg, everyone except the starter has **30 s to guess**. Scoring is the same as Draw & Guess:
+   100 / 75 / 50 for guessers, up to +100 for the starter depending on how many got it.
+4. The starter rotates each round. A player who's away when their leg comes up is skipped.
+
+### Odd One Out (3–8 players)
+
+1. Each round everyone is privately given a word. All have the same one (e.g. **PARK**) except the **imposter**,
+   who gets a related word (e.g. **GARDEN**). The imposter is **not told** they're the imposter.
+2. **Clues:** players take turns typing **one word** (30 s each) describing their word without saying it.
+   Clues that contain your own word, or have spaces, are rejected.
+3. **Vote** (45 s): everyone votes for who they think has the different word. You can change your vote until
+   everyone has voted. Most votes is accused; a tie accuses nobody.
+4. If the imposter is caught they learn it and get **one guess at the crew's word** (20 s).
+5. **Scoring:** imposter escapes → **+3**; caught but guesses the word → **+2**; caught and wrong → every crew member **+1**.
+   Anyone who voted for the imposter also gets **+1**.
+6. Everyone takes a turn as imposter before anyone gets a second turn. If the imposter leaves the room, that round ends with no points.
+
 ### Voice answers (Picture mode)
 
 🎤 uses the browser's speech recognition (Chrome, Edge, Safari). Browsers only allow the microphone on **https** pages
@@ -130,12 +156,14 @@ Then open `http://<host-LAN-IP>:3001` on every device.
 npm test
 ```
 
-Checks the game rules without a network: the question pools (270 quiz questions, 170 drawing words, all unique),
-answer matching, letter patterns, no repeats across many games for both pools, every mode's flow, hint voting,
-Draw & Guess rotation / scoring / secrecy / disconnects, and the leaderboard.
+Checks the game rules without a network: the word pools (270 quiz questions, 170 drawing words, 99 word pairs, all unique),
+answer matching, letter patterns, no repeats across many games, every mode's flow, hint voting,
+Draw & Guess / Relay rotation, scoring, secrecy and disconnects, Odd One Out clues, votes, ties and last guesses,
+and the leaderboard.
 
-With `npm run dev` running, this plays real multiplayer games over Socket.IO with 4 clients
-(simultaneous guesses, drawer and guesser disconnects, reconnects, Play Again, secret word never sent to guessers):
+With the server running, this plays real multiplayer games over Socket.IO (Draw & Guess with 4 clients, Picture,
+Odd One Out with 4, Relay with 3; simultaneous guesses, disconnects, reconnects, Play Again, and secret words never
+reaching the wrong players). It takes about a minute and a half:
 
 ```bash
 node server/e2e.mjs
@@ -146,14 +174,14 @@ node server/e2e.mjs
 | Topic | Behavior |
 |---|---|
 | **Rooms** | 4-letter code, 2–8 players, stored in server memory. Mode and rounds are room settings only the host can change, between games. |
-| **Word pools** | Quiz modes: 270 questions in 10 categories (`server/questions.js`). Draw & Guess: its own list of easy-to-draw words in 11 categories (`server/drawWords.js`). Each room shuffles each pool once and deals from it in order; `usedItems` / `usedWords` sets reject anything already played. When a pool runs out it reshuffles but still excludes the game just played. |
+| **Word pools** | Quiz modes: 270 questions in 10 categories (`server/questions.js`). Draw & Guess / Relay: easy-to-draw words in 11 categories (`server/drawWords.js`). Odd One Out: 99 related word pairs (`server/imposterPairs.js`). Each room shuffles each pool once and deals from it in order; `usedItems` / `usedWords` sets reject anything already played. When a pool runs out it reshuffles but still excludes the game just played. |
 | **Answers** | Case, spaces, punctuation, a leading "a/an/the" and simple plurals are ignored. In Letters/Classic, typing only the missing letters also counts. Voice input sends the recogniser's alternatives and the server checks each. |
 | **Race condition** | Node processes socket events one at a time. The first correct answer locks the word, so later ones get nothing. In Draw & Guess, the order correct guesses arrive in decides 100 / 75 / 50. |
-| **Secrets** | Answers are only sent to everyone once a word or turn is over. The Draw & Guess word goes only to the drawer's socket (`draw-game:word`), and to a guesser only in the reply to their own correct guess. |
+| **Secrets** | Answers are only sent to everyone once a word or turn is over. The Draw & Guess word goes only to the drawer's socket (`draw-game:word`; Relay: the starter's), and to a guesser only in the reply to their own correct guess. In Odd One Out each player's word goes only to their own socket (`imposter:word`); who the imposter is and how people voted stay hidden until the votes are counted. |
 | **Drawing sync** | The drawer's strokes are small segments `{x, y, px, py, w, c, t}` in 0–1 coordinates (any screen size), batched ~30 times a second (`draw-game:stroke`). The server only accepts them from the current drawer, validates them, relays them to the room and keeps them so a refreshed player gets the picture back (`draw-game:sync`). `draw-game:clear` wipes it. |
-| **Timers** | Run on the server; clients get the *remaining* time so device clocks don't matter. Picture/Letters 15 s (then pause), Classic 30 s, Draw & Guess 60 s. |
+| **Timers** | Run on the server; clients get the *remaining* time so device clocks don't matter. Picture/Letters 15 s (then pause), Classic 30 s, Draw & Guess 60 s, Relay 15 s per leg + 30 s guessing, Odd One Out 30 s per clue / 45 s vote / 20 s last guess. |
 | **Refresh / reconnect** | Each tab remembers its room and player ID in `sessionStorage` and rejoins automatically. A dropped player keeps their seat for 60 s while the others see "*X disconnected. Waiting for them to reconnect...*". |
-| **Leaving** | A game carries on while 2+ players remain; below that it returns to the lobby. If the host leaves, the next player becomes host. |
+| **Leaving** | A game carries on while enough players remain (2, or 3 for Odd One Out); otherwise it returns to the lobby. If the host leaves, the next player becomes host. |
 | **Leaderboard** | Kept per room by player name (survives leaving and rejoining the room), newest 50 games. |
 | **Errors** | Invalid room code, full room and duplicate name each show a friendly message. |
 

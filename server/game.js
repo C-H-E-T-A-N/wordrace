@@ -2,13 +2,19 @@
 import { randomUUID } from 'node:crypto';
 import { POOL } from './questions.js';
 import { DRAW_POOL } from './drawWords.js';
+import { IMPOSTER_POOL } from './imposterPairs.js';
 
 export const MAX_PLAYERS = 8;
 export const MIN_PLAYERS = 2;
 export const RESULT_MS = 3_000; // pause after each word
 export const ROUND_END_MS = 5_000; // longer pause after the last word of a round / after a drawing turn
 export const GUESS_POINTS = [100, 75, 50]; // Draw & Guess: 1st, 2nd, 3rd correct guesser; later ones get the last value / 2
-export const DRAWER_MAX = 100; // Draw & Guess: drawer gets this share-weighted by how many guessers got it
+export const DRAWER_MAX = 100; // Draw & Guess / Relay: (starting) drawer gets this share-weighted by how many guessers got it
+// Odd One Out points
+export const IMPOSTER_ESCAPES = 3; // imposter not caught
+export const IMPOSTER_STEALS = 2; // imposter caught but guesses the crew's word
+export const CREW_WIN = 1; // every crew member when the imposter is caught and misses the guess
+export const GOOD_VOTE = 1; // anyone who voted for the imposter
 const RECORDS_KEPT = 50;
 const MAX_STROKES = 20_000;
 
@@ -32,6 +38,16 @@ export const MODES = {
   // A Draw & Guess round = every player draws once, so turns = players x rounds.
   draw: {
     name: 'Draw & Guess', rounds: 1, maxRounds: 5, wordsPerRound: 1, wordMs: 60_000, overtime: false, input: 'draw',
+  },
+  // One word per round, drawn in 15 s legs by everyone in turn; only the first drawer knows it. Then all guess.
+  relay: {
+    name: 'Relay Draw', rounds: 3, maxRounds: 8, wordsPerRound: 1, overtime: false, input: 'relay',
+    legMs: 15_000, guessMs: 30_000,
+  },
+  // Clues one by one, then a vote, then (if caught) the imposter's last guess.
+  imposter: {
+    name: 'Odd One Out', rounds: 3, maxRounds: 8, minPlayers: 3, wordsPerRound: 1, overtime: false, input: 'imposter',
+    clueMs: 30_000, voteMs: 45_000, guessMs: 20_000,
   },
 };
 
@@ -113,7 +129,8 @@ export function createRoom(code) {
     history: [], // finished words/turns this game, for the final screen
     records: [], // finished games in this room, newest first
     phaseEndsAt: 0,
-    decks: { quiz: makeDeck(POOL), draw: makeDeck(DRAW_POOL) },
+    decks: { quiz: makeDeck(POOL), draw: makeDeck(DRAW_POOL), imposter: makeDeck(IMPOSTER_POOL) },
+    imposterOrder: [], // Odd One Out: who is the imposter in which round
     timer: null,
   };
 }
@@ -127,6 +144,14 @@ export function addPlayer(room, name) {
 
 export const modeOf = room => MODES[room.mode];
 export const isDraw = room => room.mode === 'draw';
+export const isRelay = room => room.mode === 'relay';
+export const usesCanvas = room => isDraw(room) || isRelay(room);
+export const minPlayersFor = room => modeOf(room).minPlayers ?? MIN_PLAYERS;
+const playerById = (room, id) => room.players.find(p => p.id === id);
+const nameOf = (room, id) => playerById(room, id)?.name ?? 'Someone';
+const connectedIds = room => room.players.filter(p => p.connected).map(p => p.id);
+// Players in join order, starting from the n-th one (n wraps), so each round starts with someone else.
+const rotated = (ids, n) => (ids.length ? [...ids.slice(n % ids.length), ...ids.slice(0, n % ids.length)] : []);
 const totalRounds = room => (isDraw(room) ? room.turns.length || room.players.length * room.rounds.draw : room.rounds[room.mode]);
 export const roundOf = room => Math.ceil(room.wordNo / modeOf(room).wordsPerRound);
 const isRoundEnd = room => room.wordNo % modeOf(room).wordsPerRound === 0;
@@ -145,14 +170,19 @@ export function setRounds(room, n) {
 }
 
 export function startGame(room, now = Date.now()) {
+  room.turns = [];
   if (isDraw(room)) {
     // Deterministic order: join order, repeated per "turns per player". A -> B -> C -> A -> B -> C
     const order = room.players.map(p => p.id);
     room.turns = Array.from({ length: order.length * room.rounds.draw }, (_, i) => order[i % order.length]);
     room.questions = drawFrom(room.decks.draw, room.turns.length);
+  } else if (isRelay(room)) {
+    room.questions = drawFrom(room.decks.draw, room.rounds.relay);
+  } else if (room.mode === 'imposter') {
+    room.questions = drawFrom(room.decks.imposter, room.rounds.imposter);
+    room.imposterOrder = shuffle(room.players.map(p => p.id)); // everyone gets a turn as imposter before anyone repeats
   } else {
     const mode = modeOf(room);
-    room.turns = [];
     room.questions = drawFrom(room.decks.quiz, room.rounds[room.mode] * mode.wordsPerRound);
   }
   room.players.forEach(p => (p.score = 0));
@@ -164,6 +194,12 @@ export function startGame(room, now = Date.now()) {
 // Start the next word / drawing turn. Returns false when the game is over.
 // Draw & Guess skips turns whose drawer has left or is currently disconnected.
 export function advance(room, now = Date.now()) {
+  if (isRelay(room) || room.mode === 'imposter') {
+    if (room.wordNo >= room.questions.length || !connectedIds(room).length) return false;
+    const q = room.questions[room.wordNo++];
+    (isRelay(room) ? startRelay : startImposter)(room, q, now);
+    return true;
+  }
   if (!isDraw(room)) {
     if (room.wordNo >= room.questions.length) return false;
     nextWord(room, now);
@@ -212,6 +248,220 @@ function startTurn(room, drawer, q, now) {
   room.phaseEndsAt = now + MODES.draw.wordMs;
 }
 
+// ---------- Relay Draw ----------
+
+function startRelay(room, q, now) {
+  // Everyone connected draws one leg, starting with the next player in join order each round.
+  const chain = rotated(connectedIds(room), room.wordNo - 1);
+  room.current = {
+    q, // only chain[0] (the starter) is told the word
+    starterId: chain[0],
+    chain,
+    leg: -1,
+    step: 'draw', // draw -> guess
+    stepMs: 0,
+    drawerId: null, // whoever is drawing the current leg
+    guessed: [],
+    guesses: [],
+    strokes: [],
+    locked: false,
+    drawerPoints: 0,
+  };
+  room.phase = 'round';
+  nextLeg(room, now);
+}
+
+// Hand the pen to the next connected player in the chain; after the last leg, everyone guesses.
+function nextLeg(room, now) {
+  const c = room.current;
+  while (++c.leg < c.chain.length) {
+    if (playerById(room, c.chain[c.leg])?.connected) {
+      c.drawerId = c.chain[c.leg];
+      c.stepMs = MODES.relay.legMs;
+      room.phaseEndsAt = now + c.stepMs;
+      return;
+    }
+  }
+  c.drawerId = null;
+  c.step = 'guess';
+  c.stepMs = MODES.relay.guessMs;
+  room.phaseEndsAt = now + c.stepMs;
+  checkAllGuessed(room, now); // nobody left to guess -> ends straight away
+}
+
+// ---------- Odd One Out ----------
+
+function startImposter(room, q, now) {
+  const swap = Math.random() < 0.5; // which word of the pair the crew gets
+  const crewWord = swap ? q.alt : q.answer;
+  const impWord = swap ? q.answer : q.alt;
+  // Imposter: next in the shuffled order who is here; anyone who joined later is only ever crew.
+  const order = room.imposterOrder;
+  let imposterId = null;
+  for (let i = 0; i < order.length && !imposterId; i++) {
+    const id = order[(room.wordNo - 1 + i) % order.length];
+    if (playerById(room, id)?.connected) imposterId = id;
+  }
+  imposterId ??= connectedIds(room)[0];
+  room.current = {
+    q: { ...q, answer: crewWord }, // history/answer show the crew's word
+    crewWord,
+    impWord,
+    imposterId, // secret until the vote is counted
+    step: 'clue', // clue -> vote -> (guess) -> locked
+    stepMs: 0,
+    clueOrder: rotated(connectedIds(room), room.wordNo - 1),
+    clueIdx: -1,
+    clues: [], // { id, name, text|null }
+    votes: new Map(), // voterId -> targetId, hidden until counted
+    accusedId: null,
+    caught: false,
+    imposterGuess: null,
+    outcome: null, // crew-won | imposter-guessed | imposter-escaped | imposter-left
+    points: {},
+    locked: false,
+  };
+  room.phase = 'round';
+  nextClue(room, now);
+}
+
+export const wordFor = (room, playerId) => {
+  const c = room.current;
+  if (room.mode !== 'imposter' || !c) return null;
+  return playerId === c.imposterId ? c.impWord : c.crewWord;
+};
+
+function nextClue(room, now) {
+  const c = room.current;
+  while (++c.clueIdx < c.clueOrder.length) {
+    if (playerById(room, c.clueOrder[c.clueIdx])?.connected) {
+      c.stepMs = MODES.imposter.clueMs;
+      room.phaseEndsAt = now + c.stepMs;
+      return;
+    }
+  }
+  c.step = 'vote';
+  c.stepMs = MODES.imposter.voteMs;
+  room.phaseEndsAt = now + c.stepMs;
+}
+
+const clueGiver = c => (c.step === 'clue' ? c.clueOrder[c.clueIdx] : null);
+
+// One word, no spaces, and it can't give your own word away.
+export function submitClue(room, playerId, text, now = Date.now()) {
+  const c = room.current;
+  if (room.mode !== 'imposter' || room.phase !== 'round' || c.locked || clueGiver(c) !== playerId)
+    return { ok: false, error: "It's not your turn to give a clue." };
+  const clue = String(text ?? '').trim();
+  if (!/^[\p{L}\p{N}'-]{1,20}$/u.test(clue)) return { ok: false, error: 'One word only (no spaces, up to 20 letters).' };
+  const mine = normalize(wordFor(room, playerId));
+  const said = normalize(clue);
+  if (said.includes(mine) || (said.length >= 4 && mine.includes(said))) return { ok: false, error: "Your clue can't contain your word!" };
+  c.clues.push({ id: playerId, name: nameOf(room, playerId), text: clue });
+  nextClue(room, now);
+  return { ok: true };
+}
+
+const voters = room => room.players.filter(p => p.connected);
+
+export function submitVote(room, playerId, targetId, now = Date.now()) {
+  const c = room.current;
+  if (room.mode !== 'imposter' || room.phase !== 'round' || c.locked || c.step !== 'vote')
+    return { ok: false, error: 'Voting is not open.' };
+  if (!playerById(room, playerId)) return { ok: false, error: 'You are not in this game.' };
+  if (targetId === playerId || !playerById(room, targetId)) return { ok: false, error: 'Vote for another player.' };
+  c.votes.set(playerId, targetId);
+  return { ok: true, ended: allVoted(room) && countVotes(room, now) };
+}
+
+const allVoted = room => voters(room).every(p => room.current.votes.has(p.id));
+
+// Most votes is accused; a tie (or no votes) accuses nobody. Returns true if the round is over.
+function countVotes(room, now) {
+  const c = room.current;
+  const tally = new Map();
+  for (const t of c.votes.values()) tally.set(t, (tally.get(t) ?? 0) + 1);
+  const max = Math.max(0, ...tally.values());
+  const top = [...tally].filter(([, n]) => n === max).map(([id]) => id);
+  c.accusedId = max > 0 && top.length === 1 ? top[0] : null;
+  c.caught = c.accusedId === c.imposterId;
+  if (c.caught && playerById(room, c.imposterId)?.connected) {
+    c.step = 'guess';
+    c.stepMs = MODES.imposter.guessMs;
+    room.phaseEndsAt = now + c.stepMs;
+    return false;
+  }
+  finishImposter(room, now);
+  return true;
+}
+
+// The caught imposter's last chance: name the crew's word.
+export function submitImposterGuess(room, playerId, text, now = Date.now()) {
+  const c = room.current;
+  if (room.mode !== 'imposter' || room.phase !== 'round' || c.locked || c.step !== 'guess' || playerId !== c.imposterId)
+    return { ok: false, error: 'Only the caught imposter can guess now.' };
+  c.imposterGuess = String(text ?? '').trim().slice(0, 40);
+  finishImposter(room, now);
+  return { ok: true, correct: c.outcome === 'imposter-guessed', ended: true };
+}
+
+function finishImposter(room, now, outcome) {
+  const c = room.current;
+  const add = (id, n) => {
+    const p = playerById(room, id);
+    if (!p || !n) return;
+    p.score += n;
+    c.points[id] = (c.points[id] ?? 0) + n;
+  };
+  c.outcome = outcome
+    ?? (!c.caught ? 'imposter-escaped'
+      : c.imposterGuess && isCorrect(c.imposterGuess, { q: { answer: c.crewWord } }) ? 'imposter-guessed'
+      : 'crew-won');
+  if (c.outcome !== 'imposter-left') {
+    for (const [voter, target] of c.votes) if (target === c.imposterId) add(voter, GOOD_VOTE);
+    if (c.outcome === 'imposter-escaped') add(c.imposterId, IMPOSTER_ESCAPES);
+    if (c.outcome === 'imposter-guessed') add(c.imposterId, IMPOSTER_STEALS);
+    if (c.outcome === 'crew-won') for (const p of room.players) if (p.id !== c.imposterId) add(p.id, CREW_WIN);
+  }
+  c.locked = true;
+  room.history.push({
+    emoji: '🕵️',
+    answer: c.crewWord,
+    impWord: c.impWord,
+    imposterName: nameOf(room, c.imposterId),
+    outcome: c.outcome,
+  });
+  room.phase = 'result';
+  room.phaseEndsAt = now + ROUND_END_MS;
+}
+
+// ---------- shared: someone dropped or left mid-round ----------
+
+// Returns true if this ended the round. Callers re-arm the timer either way (a step may have moved on).
+export function playerGone(room, playerId, now = Date.now()) {
+  const c = room.current;
+  if (room.phase !== 'round' || !c || c.locked) return false;
+  const stillHere = !!playerById(room, playerId);
+  if (isDraw(room)) return drawerGone(room, playerId, now) || checkAllGuessed(room, now);
+  if (isRelay(room)) {
+    if (c.step === 'draw' && c.drawerId === playerId) { nextLeg(room, now); return c.locked; }
+    return checkAllGuessed(room, now);
+  }
+  if (room.mode === 'imposter') {
+    if (!stillHere && playerId === c.imposterId) { finishImposter(room, now, 'imposter-left'); return true; }
+    if (clueGiver(c) === playerId) { nextClue(room, now); return false; }
+    if (c.step === 'vote') {
+      if (!stillHere) {
+        c.votes.delete(playerId);
+        for (const [v, t] of c.votes) if (t === playerId) c.votes.delete(v);
+      }
+      return allVoted(room) && countVotes(room, now);
+    }
+    if (c.step === 'guess' && playerId === c.imposterId) { finishImposter(room, now); return true; }
+  }
+  return false;
+}
+
 function endWord(room, winner, now) {
   const c = room.current;
   c.locked = true;
@@ -225,15 +475,16 @@ function endWord(room, winner, now) {
 function endTurn(room, now) {
   const c = room.current;
   c.locked = true;
-  const drawer = room.players.find(p => p.id === c.drawerId);
+  const artistId = isRelay(room) ? c.starterId : c.drawerId; // who knew the word
+  const drawer = playerById(room, artistId);
   const guessedIds = new Set(c.guessed.map(g => g.id));
-  const eligible = room.players.filter(p => p.id !== c.drawerId && (p.connected || guessedIds.has(p.id))).length;
+  const eligible = room.players.filter(p => p.id !== artistId && (p.connected || guessedIds.has(p.id))).length;
   c.drawerPoints = eligible ? Math.round((DRAWER_MAX * c.guessed.length) / eligible) : 0;
   if (drawer) drawer.score += c.drawerPoints;
   room.history.push({
     emoji: c.q.emoji,
     answer: c.q.answer,
-    drawerName: drawer?.name ?? 'Someone',
+    drawerName: isRelay(room) ? c.chain.map(id => nameOf(room, id)).join(' → ') : drawer?.name ?? 'Someone',
     guessers: c.guessed.map(g => g.name),
     drawerPoints: c.drawerPoints,
   });
@@ -246,7 +497,8 @@ function endTurn(room, now) {
 // `guesses` may be one string or several (voice input sends the recogniser's alternatives).
 export function submitAnswer(room, playerId, guesses, now = Date.now()) {
   const c = room.current;
-  if (isDraw(room) || room.phase !== 'round' || !c || c.locked) return { correct: false, reason: 'closed' };
+  if (!modeOf(room).hide && !modeOf(room).hintVote) return { correct: false, reason: 'closed' }; // quiz modes only
+  if (room.phase !== 'round' || !c || c.locked) return { correct: false, reason: 'closed' };
   const player = room.players.find(p => p.id === playerId);
   if (!player) return { correct: false, reason: 'closed' };
   const list = (Array.isArray(guesses) ? guesses : [guesses]).slice(0, 5);
@@ -255,11 +507,13 @@ export function submitAnswer(room, playerId, guesses, now = Date.now()) {
   return { correct: true };
 }
 
-// Draw & Guess. Everyone except the drawer can guess until they get it; points shrink with each correct guesser.
+// Draw & Guess / Relay. Everyone who doesn't know the word can guess until they get it; points shrink with each
+// correct guesser. Relay only takes guesses once every leg is drawn.
 export function submitDrawGuess(room, playerId, text, now = Date.now()) {
   const c = room.current;
-  if (!isDraw(room) || room.phase !== 'round' || !c || c.locked) return { correct: false, reason: 'closed' };
-  if (playerId === c.drawerId) return { correct: false, reason: 'drawer' };
+  if (!usesCanvas(room) || room.phase !== 'round' || !c || c.locked) return { correct: false, reason: 'closed' };
+  if (isRelay(room) && c.step !== 'guess') return { correct: false, reason: 'closed' };
+  if (playerId === (isRelay(room) ? c.starterId : c.drawerId)) return { correct: false, reason: 'drawer' };
   if (c.guessed.some(g => g.id === playerId)) return { correct: false, reason: 'done' };
   const player = room.players.find(p => p.id === playerId);
   const guess = String(text ?? '').trim().replace(/\s+/g, ' ').slice(0, 40);
@@ -280,9 +534,10 @@ export function submitDrawGuess(room, playerId, text, now = Date.now()) {
 // Ends the turn once every connected guesser has it. Also called when a guesser disconnects or leaves.
 export function checkAllGuessed(room, now = Date.now()) {
   const c = room.current;
-  if (!isDraw(room) || room.phase !== 'round' || c.locked) return false;
+  if (!usesCanvas(room) || room.phase !== 'round' || c.locked || (isRelay(room) && c.step !== 'guess')) return false;
+  const knower = isRelay(room) ? c.starterId : c.drawerId;
   const guessedIds = new Set(c.guessed.map(g => g.id));
-  if (!room.players.filter(p => p.id !== c.drawerId && p.connected).every(p => guessedIds.has(p.id))) return false;
+  if (!room.players.filter(p => p.id !== knower && p.connected).every(p => guessedIds.has(p.id))) return false;
   endTurn(room, now);
   return true;
 }
@@ -294,10 +549,27 @@ export function drawerGone(room, playerId, now = Date.now()) {
   return true;
 }
 
-// Timer ran out. Overtime modes keep the word open; Classic and Draw & Guess end it. Returns true if it ended.
+// Timer ran out. Overtime modes keep the word open; Classic and Draw & Guess end it; Relay and Odd One Out move to
+// their next step (with a new deadline). Returns true if the round ended.
 export function wordTimeUp(room, now = Date.now()) {
   if (room.phase !== 'round') return false;
+  const c = room.current;
   if (isDraw(room)) { endTurn(room, now); return true; }
+  if (isRelay(room)) {
+    if (c.step === 'draw') { nextLeg(room, now); return c.locked; }
+    endTurn(room, now);
+    return true;
+  }
+  if (room.mode === 'imposter') {
+    if (c.step === 'clue') {
+      c.clues.push({ id: clueGiver(c), name: nameOf(room, clueGiver(c)), text: null }); // ran out of time: no clue
+      nextClue(room, now);
+      return false;
+    }
+    if (c.step === 'vote') return countVotes(room, now);
+    finishImposter(room, now); // guess step: no answer in time
+    return true;
+  }
   if (modeOf(room).overtime) { room.current.overtime = true; return false; }
   endWord(room, null, now);
   return true;
@@ -305,7 +577,7 @@ export function wordTimeUp(room, now = Date.now()) {
 
 // Only once the time is up, so a word can't be skipped before anyone had a real go.
 export function skipWord(room, now = Date.now()) {
-  if (isDraw(room) || room.phase !== 'round' || !room.current.overtime) return false;
+  if (!modeOf(room).overtime || room.phase !== 'round' || !room.current.overtime) return false;
   endWord(room, null, now);
   return true;
 }
@@ -323,11 +595,11 @@ export function checkHint(room) {
   if (c?.hintVotes && !c.hintShown && room.players.filter(p => p.connected).every(p => c.hintVotes.has(p.id))) c.hintShown = true;
 }
 
-// Draw & Guess canvas: only the drawer, only during their turn. Coordinates are 0..1 so any canvas size works.
-// Returns the cleaned segments to relay, or null to drop the message.
+// Canvas: only the current drawer (Relay: whoever has this leg), only while drawing. Coordinates are 0..1 so any
+// canvas size works. Returns the cleaned segments to relay, or null to drop the message.
 export function addStrokes(room, playerId, segments) {
   const c = room.current;
-  if (!isDraw(room) || room.phase !== 'round' || c.drawerId !== playerId || !Array.isArray(segments)) return null;
+  if (!usesCanvas(room) || room.phase !== 'round' || c.locked || !c.drawerId || c.drawerId !== playerId || !Array.isArray(segments)) return null;
   const unit = v => Number.isFinite(v) && v >= 0 && v <= 1;
   const clean = segments.slice(0, 200).filter(s =>
     s && [s.x, s.y, s.px, s.py].every(unit) && Number.isFinite(s.w) && s.w > 0 && s.w <= 0.2 &&
@@ -344,11 +616,12 @@ export function clearStrokes(room, playerId) {
   return true;
 }
 
-// What a player may see privately: the drawer (and anyone who already guessed it) gets the secret word.
+// Relay has no Clear: a leg can't wipe what the others drew.
+// What a player may see privately: the drawer (Relay: the starter) and anyone who already guessed it get the word.
 export function drawSync(room, playerId) {
   const c = room.current;
-  if (!isDraw(room) || !c) return { strokes: [], word: null };
-  const knows = c.locked || c.drawerId === playerId || c.guessed.some(g => g.id === playerId);
+  if (!usesCanvas(room) || !c) return { strokes: [], word: null };
+  const knows = c.locked || (isRelay(room) ? c.starterId : c.drawerId) === playerId || c.guessed.some(g => g.id === playerId);
   return { strokes: c.strokes, word: knows ? c.q.answer : null, emoji: knows ? c.q.emoji : null };
 }
 
@@ -373,8 +646,8 @@ export function leaderboard(records) {
     for (const p of r.players) {
       const e = by.get(p.name) ?? { name: p.name, games: 0, wins: 0, words: 0, best: 0, drawBest: 0 };
       e.games++;
-      if (r.mode === 'draw') e.drawBest = Math.max(e.drawBest, p.score);
-      else { e.words += p.score; e.best = Math.max(e.best, p.score); }
+      if (r.mode === 'draw' || r.mode === 'relay') e.drawBest = Math.max(e.drawBest, p.score);
+      else if (r.mode !== 'imposter') { e.words += p.score; e.best = Math.max(e.best, p.score); } // imposter: wins only
       if (r.winners.includes(p.name)) e.wins++;
       by.set(p.name, e);
     }
@@ -388,12 +661,52 @@ export function toLobby(room) {
   room.current = null;
   room.history = [];
   room.turns = [];
+  room.imposterOrder = [];
   room.players.forEach(p => (p.score = 0));
 }
 
 function publicCurrent(room) {
   const c = room.current;
   if (!c) return null;
+  const counted = c.locked || (c.step && c.step !== 'clue' && c.step !== 'vote');
+  if (room.mode === 'imposter') {
+    return {
+      step: c.locked ? 'reveal' : c.step,
+      stepMs: c.stepMs,
+      clueOrder: c.clueOrder.map(id => ({ id, name: nameOf(room, id) })),
+      clueGiverId: clueGiver(c),
+      clues: c.clues,
+      voted: [...c.votes.keys()], // who has voted, not for whom
+      votes: counted ? [...c.votes].map(([from, to]) => ({ from, to })) : null,
+      accusedId: counted ? c.accusedId : null,
+      // The imposter is revealed once caught (they get their last guess) or at the end of the round.
+      imposterId: counted && (c.caught || c.locked) ? c.imposterId : null,
+      imposterName: counted && (c.caught || c.locked) ? nameOf(room, c.imposterId) : null,
+      crewWord: c.locked ? c.crewWord : null,
+      impWord: c.locked ? c.impWord : null,
+      imposterGuess: c.locked ? c.imposterGuess : null,
+      outcome: c.locked ? c.outcome : null,
+      points: c.locked ? c.points : null,
+      answer: c.locked ? c.crewWord : null,
+    };
+  }
+  if (isRelay(room)) {
+    return {
+      step: c.step,
+      stepMs: c.stepMs,
+      starterId: c.starterId,
+      starterName: nameOf(room, c.starterId),
+      chain: c.chain.map(id => ({ id, name: nameOf(room, id) })),
+      leg: c.leg,
+      drawerId: c.drawerId,
+      drawerName: c.drawerId ? nameOf(room, c.drawerId) : null,
+      guessed: c.guessed,
+      guesses: c.guesses.slice(-20),
+      drawerPoints: c.locked ? c.drawerPoints : null,
+      answer: c.locked ? c.q.answer : null,
+      emoji: c.locked ? c.q.emoji : null,
+    };
+  }
   if (isDraw(room)) {
     const drawer = room.players.find(p => p.id === c.drawerId);
     return {
@@ -440,7 +753,7 @@ export function publicState(room, now = Date.now()) {
     phase: room.phase,
     round: roundOf(room),
     word: ((room.wordNo - 1) % mode.wordsPerRound) + 1, // word number inside the round
-    minPlayers: MIN_PLAYERS,
+    minPlayers: minPlayersFor(room),
     maxPlayers: MAX_PLAYERS,
     remainingMs: Math.max(0, room.phaseEndsAt - now),
     players: room.players.map(({ id, name, score, connected }) => ({ id, name, score, connected })),
