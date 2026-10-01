@@ -251,7 +251,7 @@ const room5 = (await q1.emit('create', { name: 'Ria' })).code;
 await q2.emit('join', { code: room5, name: 'Sol' });
 assert.ok((await q1.emit('setMode', 'classic')).ok);
 assert.ok((await q1.emit('start')).ok);
-await until(() => q2.state?.phase === 'round');
+await until(() => q1.state?.phase === 'round' && q2.state?.phase === 'round');
 assert.ok(q1.state.current.pattern.includes('_'));
 // Test-only shortcut: Classic shows the hint, and hints are unique in the pool, so look the answer up.
 const { POOL } = await import('./questions.js');
