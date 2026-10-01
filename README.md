@@ -33,6 +33,11 @@ In Picture and Letters, a word doesn't skip when its 15 s run out with **nobody*
 keep guessing, and the host may skip it. Once someone gets a paused word, the others get a **5 s last call**. Every finished game is saved to the room's **leaderboard** (wins, games, words guessed,
 best Draw & Guess score) and the list of past games, shown in the lobby and on the end screen.
 
+**Looks the same on every device:** the fonts (Nunito, Fredoka) and the colour emoji (Twemoji) ship with the game
+instead of using each phone's or PC's own, so iPhone, Android, Windows and Mac all show identical letters and
+pictures, even offline on local Wi-Fi. One layout scales smoothly from phones to desktops. There are sounds
+(🔊/🔇 button, remembered per device), a buzz on phones, confetti when you score, and a splash at each new round.
+
 - **client/**: React + Vite
 - **server/**: Node.js + Express + Socket.IO. The server is the source of truth: it picks the words, checks every answer, awards points, runs the timers and decides whose turn it is.
 

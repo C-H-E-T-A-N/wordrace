@@ -317,9 +317,6 @@ input.tile:focus { border-style: solid; background: rgba(255, 203, 61, 0.12); tr
 .rec-win { font-weight: 700; white-space: nowrap; }
 
 @media (max-width: 600px) {
-  .modes { grid-template-columns: 1fr; }
-  .mode { flex-direction: row; flex-wrap: wrap; align-items: center; column-gap: 10px; }
-  .mode small { flex-basis: 100%; }
   .draw-area, .feed, .draw-game .answer { width: 100%; max-width: 100%; }
   .feed { max-height: 110px; }
   .tool { min-width: 36px; height: 36px; }
@@ -335,4 +332,155 @@ input.tile:focus { border-style: solid; background: rgba(255, 203, 61, 0.12); tr
   .word { gap: 6px 16px; }
   .word-part { gap: 5px; }
   .room-code strong { font-size: 44px; }
+}
+
+/* =====================================================================================
+   v2 — one look on every device
+   Same fonts everywhere (bundled Nunito + Fredoka + Twemoji color emoji), fluid sizes with
+   clamp(), one layout for phone/tablet/desktop, 48px tap targets, safe areas for notches.
+   These rules come last on purpose: they override the earlier per-screen-size tweaks.
+   ===================================================================================== */
+:root {
+  --font-ui: 'Nunito Variable', 'Twemoji', system-ui, sans-serif;
+  --font-display: 'Fredoka Variable', 'Twemoji', 'Nunito Variable', system-ui, sans-serif;
+  font-family: var(--font-ui);
+  font-size: 16px;
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+}
+html { -webkit-tap-highlight-color: transparent; }
+body { min-height: 100vh; min-height: 100dvh; font-family: var(--font-ui); overscroll-behavior-y: none; }
+button, input { font-family: inherit; }
+.logo, h1, h2, h3, .room-code strong, .timer-ring span, .score b, .tile, .letter-badge, .answer-reveal,
+.btn.primary, .cat-title b, .secret b, .splash b, .round b, .podium-row b, .mode b, .trophy { font-family: var(--font-display); }
+h2 { font-weight: 600; }
+
+.app {
+  min-height: 100vh; min-height: 100dvh;
+  padding: max(58px, calc(env(safe-area-inset-top) + 50px)) max(12px, env(safe-area-inset-right))
+    max(24px, env(safe-area-inset-bottom)) max(12px, env(safe-area-inset-left)) !important;
+}
+.card { padding: clamp(18px, 4.5vw, 30px); border-radius: clamp(20px, 5vw, 28px); gap: clamp(12px, 3vw, 18px); }
+.logo { font-size: clamp(36px, 11vw, 52px); font-weight: 700; letter-spacing: 0; }
+.room-code strong { font-size: clamp(42px, 13vw, 60px); letter-spacing: clamp(6px, 3vw, 14px); font-weight: 700; }
+
+/* inputs: 16px+ stops iPhone zooming in on focus; 48px tall everywhere */
+input { font-size: max(16px, 1rem); min-height: 48px; }
+.btn { min-height: 48px; touch-action: manipulation; border-radius: 16px; }
+.btn.ghost { min-height: 40px; }
+.btn.primary { box-shadow: 0 10px 28px rgba(255, 95, 162, 0.35); letter-spacing: 0.3px; }
+.btn.primary:hover:not(:disabled) { transform: translateY(-1px); filter: brightness(1.08); }
+.btn.primary:not(:disabled) { animation: glow 2.4s ease-in-out infinite; }
+@keyframes glow { 50% { box-shadow: 0 10px 34px rgba(255, 203, 61, 0.45); } }
+button, .mode, .vote-btn, .veto, .tool, .pill { touch-action: manipulation; }
+
+/* top bar: same arrangement on every screen: info + timer, then a scrollable row of players */
+.topbar { grid-template-columns: 1fr auto !important; grid-template-areas: "info timer" "scores scores"; gap: 10px 12px; }
+.topbar .round { grid-area: info; font-size: 14px; }
+.topbar .round b { font-size: clamp(22px, 6vw, 28px); }
+.topbar .timer-ring { grid-area: timer; }
+.topbar .scores {
+  grid-area: scores; grid-column: 1 / -1 !important; justify-content: flex-start !important;
+  flex-wrap: nowrap; overflow-x: auto; scroll-snap-type: x proximity; padding: 2px 2px 6px; scrollbar-width: none;
+}
+.topbar .scores::-webkit-scrollbar { display: none; }
+.scores > * { flex: none; scroll-snap-align: start; }
+.scores > :first-child { margin-left: auto; } /* centred when they fit, scrollable when they don't */
+.scores > :last-child { margin-right: auto; }
+.score { gap: 8px; padding: 5px 14px 5px 5px; border-radius: 99px; }
+.score .name { max-width: 96px; font-size: 14px; }
+.score b { font-size: 19px; min-width: 22px; font-weight: 600; }
+.score.offline { opacity: 0.55; }
+.score.winner { transform: none; box-shadow: 0 0 0 2px var(--good), 0 0 18px rgba(61, 220, 151, 0.4); }
+.timebar { display: none; }
+
+/* avatars */
+.avatar {
+  width: var(--size); height: var(--size); flex: none; display: inline-grid; place-items: center; border-radius: 50%;
+  background: var(--av, #555); color: #1a1040; font-family: var(--font-display); font-weight: 700;
+  font-size: calc(var(--size) * 0.48); line-height: 1; box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.35);
+}
+.avatar.off { filter: grayscale(1); opacity: 0.55; }
+.avatar.ghost { background: rgba(255, 255, 255, 0.08); color: var(--muted); box-shadow: inset 0 0 0 2px var(--line); }
+.players li { padding: 10px 12px; }
+.podium-name { display: inline-flex; align-items: center; gap: 8px; }
+
+/* ring timer */
+.timer-ring { position: relative; width: clamp(56px, 15vw, 70px); aspect-ratio: 1; display: grid; place-items: center; }
+.timer-ring svg { position: absolute; inset: 0; transform: rotate(-90deg); }
+.timer-ring circle { fill: none; stroke-width: 6; }
+.timer-ring .track { stroke: rgba(255, 255, 255, 0.12); }
+.timer-ring .bar { stroke: var(--accent); stroke-linecap: round; transition: stroke-dashoffset 0.25s linear, stroke 0.3s; }
+.timer-ring span { position: relative; font-size: clamp(19px, 5.4vw, 25px); font-weight: 600; }
+.timer-ring.urgent .bar { stroke: var(--bad); }
+.timer-ring.urgent span { color: var(--bad); animation: pulse 0.5s infinite; }
+
+/* fluid game pieces */
+.stage, .draw-stage, .cat-stage, .imposter-stage { gap: clamp(10px, 2.5vw, 16px); }
+.emoji-box { width: clamp(132px, 38vw, 212px); height: auto; aspect-ratio: 1; border-radius: clamp(24px, 7vw, 36px); }
+.emoji-box span { font-size: clamp(78px, 23vw, 130px); }
+.tile { width: clamp(30px, 9.4vw, 50px); height: clamp(38px, 11.6vw, 60px); font-size: clamp(18px, 5.6vw, 30px); border-radius: clamp(8px, 2.2vw, 12px); }
+.word { gap: clamp(6px, 2vw, 10px) clamp(14px, 4vw, 26px); }
+.word-part { gap: clamp(4px, 1.4vw, 8px); }
+.answer input { font-size: max(16px, clamp(16px, 4.5vw, 19px)); }
+.answer-reveal { font-size: clamp(24px, 7vw, 32px); font-weight: 700; }
+.letter-badge { width: clamp(74px, 21vw, 98px); height: clamp(74px, 21vw, 98px); font-size: clamp(46px, 13vw, 64px); font-weight: 700; }
+.cat-title b { font-size: clamp(24px, 7.5vw, 34px); font-weight: 600; }
+.secret b { font-weight: 600; }
+.hint, .hint-reveal { font-size: clamp(15px, 4vw, 18px); }
+
+/* mode picker: two columns on every device */
+.modes { grid-template-columns: repeat(2, minmax(0, 1fr)) !important; gap: clamp(8px, 2vw, 12px); }
+.mode { flex-direction: column !important; align-items: flex-start; padding: clamp(10px, 3vw, 14px); transition: transform 0.12s, border-color 0.15s, background 0.15s; }
+.mode:active:not(:disabled) { transform: scale(0.97); }
+.mode.selected { box-shadow: 0 0 0 1px var(--accent), 0 10px 24px rgba(255, 203, 61, 0.18); }
+.mode-icon { font-size: clamp(26px, 8vw, 32px); }
+.mode { min-width: 0; }
+.mode small { overflow-wrap: anywhere; }
+.join .btn { white-space: nowrap; padding-inline: 16px; }
+.join .code-input { min-width: 0; }
+.mode b { font-size: clamp(14px, 4vw, 17px); font-weight: 600; }
+.mode small { font-size: clamp(11px, 3vw, 12.5px); }
+
+/* overlays never taller than the screen */
+.overlay { padding: max(16px, env(safe-area-inset-top)) 12px max(16px, env(safe-area-inset-bottom)); }
+.overlay .card { max-height: calc(100dvh - 32px); overflow-y: auto; animation: result-in 0.35s cubic-bezier(.2, 1.4, .4, 1); }
+@keyframes result-in { from { opacity: 0; transform: scale(0.85) translateY(20px); } }
+.toast { bottom: max(24px, calc(env(safe-area-inset-bottom) + 12px)); }
+
+/* mute button */
+.mute {
+  position: fixed; z-index: 25; top: max(10px, env(safe-area-inset-top)); right: max(10px, env(safe-area-inset-right));
+  width: 44px; height: 44px; border-radius: 50%; border: 1px solid var(--line); cursor: pointer;
+  background: rgba(20, 10, 45, 0.7); backdrop-filter: blur(8px); font-size: 20px; color: var(--text);
+}
+.banner { padding-right: 64px; padding-left: 64px; }
+
+/* round splash */
+.splash {
+  position: fixed; inset: 0; z-index: 30; pointer-events: none; display: grid; place-content: center; gap: 6px;
+  text-align: center; background: radial-gradient(circle, rgba(26, 16, 64, 0.75) 0, transparent 65%);
+  animation: splash 1.4s ease-out forwards;
+}
+.splash b {
+  font-size: clamp(52px, 15vw, 104px); font-weight: 700; line-height: 1;
+  background: linear-gradient(90deg, var(--accent), var(--accent2)); -webkit-background-clip: text; background-clip: text; color: transparent;
+  filter: drop-shadow(0 6px 20px rgba(0, 0, 0, 0.45));
+}
+.splash small { font-size: clamp(16px, 4.5vw, 22px); font-weight: 700; color: var(--text); text-shadow: 0 2px 12px rgba(0, 0, 0, 0.6); }
+@keyframes splash {
+  0% { opacity: 0; transform: scale(0.5); }
+  18% { opacity: 1; transform: scale(1.08); }
+  30% { transform: scale(1); }
+  75% { opacity: 1; }
+  100% { opacity: 0; transform: scale(1.12); }
+}
+
+/* confetti */
+.confetti { position: fixed; inset: 0; z-index: 40; pointer-events: none; overflow: hidden; }
+.confetti i { position: absolute; top: -16px; width: 9px; height: 14px; border-radius: 2px; animation: confetti-fall linear forwards; }
+@keyframes confetti-fall { to { transform: translate(var(--drift), 108vh) rotate(var(--spin)); } }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; transition-duration: 0.01ms !important; }
 }

@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { io } from 'socket.io-client';
+import { buzz, confetti, isMuted, play, setMuted } from './fx.js';
 
 // Connect to the same origin the page came from (LAN IP or localhost). In dev, Vite proxies /socket.io to the server.
 const socket = io();
@@ -31,7 +32,6 @@ function useNow() {
   return now;
 }
 
-const clock = s => `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`;
 
 export default function App() {
   const [game, setGame] = useState(null);
@@ -40,6 +40,9 @@ export default function App() {
   const [lanIps, setLanIps] = useState([]);
   const [toast, setToast] = useState(null);
   const [activity, setActivity] = useState(null);
+  const [muted, setMutedState] = useState(isMuted);
+  const [splash, setSplash] = useState(null);
+  const prevGame = useRef(null);
 
   const flash = text => setToast({ text, id: Date.now() });
 
@@ -57,7 +60,7 @@ export default function App() {
       notice: flash,
       lan: setLanIps,
       kicked: msg => { session.clear(); setGame(null); flash(msg); },
-      opponent: a => setActivity({ ...a, at: Date.now() }),
+      opponent: a => { setActivity({ ...a, at: Date.now() }); if (a.type === 'solved') play('pop'); },
     };
     for (const [e, h] of Object.entries(handlers)) socket.on(e, h);
     if (socket.connected) rejoin();
@@ -69,6 +72,34 @@ export default function App() {
     const t = setTimeout(() => setToast(null), 3500);
     return () => clearTimeout(t);
   }, [toast]);
+
+  // Feedback from state changes, the same for every mode: my score went up -> confetti; new round -> splash;
+  // game over -> fanfare for the winner.
+  useEffect(() => {
+    const p = prevGame.current;
+    prevGame.current = game;
+    if (!game || !p || p.code !== game.code) return;
+    const myScore = s => s.players.find(x => x.id === me)?.score ?? 0;
+    const gained = game.phase === 'lobby' ? 0 : myScore(game) - myScore(p);
+    if (gained > 0) { play('correct'); buzz(50); confetti(gained >= 100 ? 70 : 35); }
+    if (game.phase === 'round' && (p.phase === 'lobby' || p.phase === 'final' || p.round !== game.round)) {
+      play('start');
+      setSplash({ id: Date.now(), title: `${game.mode === 'draw' ? 'Turn' : 'Round'} ${game.round}`, sub: splashLine(game) });
+    }
+    if (game.phase === 'result' && p.phase === 'round' && gained <= 0) play('pop');
+    if (game.phase === 'final' && p.phase !== 'final') {
+      const top = Math.max(...game.players.map(x => x.score));
+      if (top > 0 && myScore(game) === top) { play('win'); buzz([60, 40, 120]); confetti(160); } else play('pop');
+    }
+  }, [game]);
+
+  useEffect(() => {
+    if (!splash) return;
+    const t = setTimeout(() => setSplash(null), 1400);
+    return () => clearTimeout(t);
+  }, [splash]);
+
+  const toggleMute = () => { setMuted(!muted); setMutedState(!muted); if (muted) play('pop'); };
 
   const entered = res => {
     if (!res.ok) return flash(res.error);
@@ -103,8 +134,55 @@ export default function App() {
     <div className="app">
       {!online && <div className="banner bad">Connection lost. Reconnecting…</div>}
       {online && away && <div className="banner warn">{away} disconnected. Waiting for them to reconnect...</div>}
+      <button className="mute" onClick={toggleMute} aria-label={muted ? 'Sound off, tap to turn on' : 'Sound on, tap to mute'}>{muted ? '🔇' : '🔊'}</button>
       {screen}
+      {splash && (
+        <div className="splash" key={splash.id} aria-hidden="true">
+          <b>{splash.title}</b>
+          {splash.sub && <small>{splash.sub}</small>}
+        </div>
+      )}
       {toast && <div className="toast" key={toast.id}>{toast.text}</div>}
+    </div>
+  );
+}
+
+// Second line of the round splash: what this round is about (never a secret).
+function splashLine(game) {
+  const c = game.current;
+  if (game.mode === 'draw') return `🎨 ${c?.drawerName} is drawing`;
+  if (game.mode === 'relay') return `⭐ ${c?.starterName} starts the drawing`;
+  if (game.mode === 'imposter') return '🕵️ Who has the different word?';
+  if (game.mode === 'categories') return `${c?.letter} · ${c?.categories?.join(' · ')}`;
+  return `${MODE_ICON[game.mode]} ${game.modeInfo.name} · ${game.round} of ${game.modeInfo.rounds}`;
+}
+
+// Coloured initial; the colour comes from the name, so it's the same on every device.
+const AVATAR_COLORS = ['#ff5fa2', '#ffcb3d', '#3ddc97', '#5b8cff', '#a855f7', '#ff9f1c', '#2dd4bf', '#f87171'];
+function Avatar({ name, size = 32, off = false }) {
+  let h = 0;
+  for (const ch of name) h = (h * 31 + ch.codePointAt(0)) >>> 0;
+  return (
+    <span className={`avatar ${off ? 'off' : ''}`} aria-hidden="true"
+      style={{ '--av': AVATAR_COLORS[h % AVATAR_COLORS.length], '--size': `${size}px` }}>
+      {[...name.trim()][0]?.toUpperCase()}
+    </span>
+  );
+}
+
+// Circular countdown; ticks during the last seconds.
+function TimerRing({ pct, label, urgent = false, tick = false }) {
+  const r = 26;
+  const circ = 2 * Math.PI * r;
+  useEffect(() => { if (tick && urgent) play('tick'); }, [label]);
+  return (
+    <div className={`timer-ring ${urgent ? 'urgent' : ''}`} role="timer" aria-label={`Time left: ${label}`}>
+      <svg viewBox="0 0 64 64" aria-hidden="true">
+        <circle className="track" cx="32" cy="32" r={r} />
+        <circle className="bar" cx="32" cy="32" r={r} strokeDasharray={circ}
+          strokeDashoffset={circ * (1 - Math.min(1, Math.max(0, pct / 100)))} />
+      </svg>
+      <span>{label}</span>
     </div>
   );
 }
@@ -215,7 +293,7 @@ function Lobby({ game, me, lanIps, actions }) {
       <ul className="players">
         {game.players.map(p => (
           <li key={p.id}>
-            <span className={`dot ${p.connected ? 'on' : ''}`} />
+            <Avatar name={p.name} size={36} off={!p.connected} />
             <b>{p.name}</b>
             {p.id === game.hostId && <em>host</em>}
             {p.id === me && <em>you</em>}
@@ -223,7 +301,7 @@ function Lobby({ game, me, lanIps, actions }) {
           </li>
         ))}
         {n < game.maxPlayers && (
-          <li className="empty"><span className="dot" />
+          <li className="empty"><span className="avatar ghost" style={{ '--size': '36px' }}>?</span>
             <span className="waiting">{n < game.minPlayers ? `Waiting for player ${n + 1}…` : `Room for ${game.maxPlayers - n} more`}</span>
           </li>
         )}
@@ -246,8 +324,8 @@ function Scores({ game, me }) {
   return (
     <div className="scores">
       {game.players.map(p => (
-        <div key={p.id} className={`score ${p.id === me ? 'me' : ''} ${c?.solved?.some(x => x.id === p.id) ? 'winner' : ''}`}>
-          <span className={`dot ${p.connected ? 'on' : ''}`} />
+        <div key={p.id} className={`score ${p.id === me ? 'me' : ''} ${p.connected ? '' : 'offline'} ${c?.solved?.some(x => x.id === p.id) ? 'winner' : ''}`}>
+          <Avatar name={p.name} size={28} off={!p.connected} />
           <span className="name">{game.mode === 'draw' && c?.drawerId === p.id && '🎨 '}{p.name}{p.id === me && ' (you)'}</span>
           <b key={p.score} className="pop">{p.score}</b>
         </div>
@@ -416,7 +494,7 @@ function Game({ game, me, activity, actions }) {
 
   const submit = guess => socket.emit('answer', guess, res => {
     if (res.correct) setMine({ word: res.word, points: res.points });
-    else if (!res.reason) setWrong(Date.now());
+    else if (!res.reason) { setWrong(Date.now()); play('wrong'); buzz([30, 40, 30]); }
   });
   const onType = () => {
     if (Date.now() - lastTyping.current > 800) { lastTyping.current = Date.now(); socket.emit('typing'); }
@@ -442,12 +520,9 @@ function Game({ game, me, activity, actions }) {
             {c.difficulty && game.mode === 'letters' && <> · <span className={`diff ${c.difficulty.toLowerCase()}`}>{c.difficulty}</span></>}
           </small>
         </div>
-        <div className={`timer ${open && !waiting && secs <= 5 ? 'urgent' : ''}`}>
-          {!open ? '–' : waiting ? '⏸' : <>{secs}<small>s</small></>}
-        </div>
+        <TimerRing pct={waiting ? 100 : pct} label={!open ? '–' : waiting ? '⏸' : secs} urgent={open && !waiting && secs <= 5} tick={open && !waiting} />
         <Scores game={game} me={me} />
       </header>
-      <div className="timebar"><div style={{ width: `${pct}%` }} /></div>
 
       <main className="stage">
         {c.category && <div className="chip">{c.category}</div>}
@@ -569,10 +644,9 @@ function CategoriesGame({ game, me }) {
           Round <b>{game.round}</b> / {game.modeInfo.rounds}
           <small>🔠 Categories · <span className="your-turn">{stepLabel}</span></small>
         </div>
-        <div className={`timer ${open && secs <= 10 ? 'urgent' : ''}`}>{open ? clock(secs) : '–'}</div>
+        <TimerRing pct={pct} label={open ? secs : '–'} urgent={open && secs <= 10} tick={open && secs <= 5} />
         <Scores game={game} me={me} />
       </header>
-      <div className="timebar"><div style={{ width: `${pct}%` }} /></div>
 
       <main className="cat-stage">
         <div className="cat-prompt">
@@ -807,7 +881,7 @@ function DrawGame({ game, me }) {
     if (!text.trim()) return;
     socket.emit('draw-game:guess', text, res => {
       if (res.correct) { setSecret({ word: res.word }); setText(''); }
-      else if (!res.reason) { setWrong(Date.now()); setText(''); }
+      else if (!res.reason) { setWrong(Date.now()); setText(''); play('wrong'); buzz([30, 40, 30]); }
     });
   };
 
@@ -824,10 +898,9 @@ function DrawGame({ game, me }) {
           {relay ? 'Round' : 'Turn'} <b>{game.round}</b> / {game.modeInfo.rounds}
           <small>{status}</small>
         </div>
-        <div className={`timer ${open && secs <= (relay ? 5 : 10) ? 'urgent' : ''}`}>{open ? clock(secs) : '–'}</div>
+        <TimerRing pct={pct} label={open ? secs : '–'} urgent={open && secs <= (relay ? 5 : 10)} tick={open && secs <= 5} />
         <Scores game={game} me={me} />
       </header>
-      <div className="timebar"><div style={{ width: `${pct}%` }} /></div>
 
       <main className="draw-stage">
         {relay && (
@@ -950,10 +1023,9 @@ function ImposterGame({ game, me }) {
           Round <b>{game.round}</b> / {game.modeInfo.rounds}
           <small>🕵️ Odd One Out · <span className="your-turn">{stepLabel}</span></small>
         </div>
-        <div className={`timer ${open && secs <= 5 ? 'urgent' : ''}`}>{open ? clock(secs) : '–'}</div>
+        <TimerRing pct={pct} label={open ? secs : '–'} urgent={open && secs <= 5} tick={open} />
         <Scores game={game} me={me} />
       </header>
-      <div className="timebar"><div style={{ width: `${pct}%` }} /></div>
 
       <main className="imposter-stage">
         <div className="secret">Your word: <b>{word ?? '…'}</b>
@@ -1074,7 +1146,7 @@ function Final({ game, me, actions }) {
           return (
             <li key={p.id} className={!tie && i === 0 ? 'first' : ''}>
               <div className="podium-row">
-                <span>{medal(p)} {p.name}{p.id === me && ' (you)'}</span>
+                <span className="podium-name">{medal(p)} <Avatar name={p.name} size={30} /> {p.name}{p.id === me && ' (you)'}</span>
                 <b>{p.score} pts{quiz && <small className="muted"> · {words.length} {words.length === 1 ? 'word' : 'words'}</small>}</b>
               </div>
               {words.length > 0 && <WordList items={words} />}
