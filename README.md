@@ -11,7 +11,7 @@ One room, one lobby: the host picks one of seven game modes.
 | 🎨 **Draw & Guess** | Pictionary. Players take turns drawing a secret word on a shared canvas while everyone else guesses. Points for fast guessers and for the drawer. |
 | 🏃 **Relay Draw** | Only the first artist sees the word. The drawing is passed around: everyone adds a 15 s leg without knowing what it is, then everyone guesses. |
 | 🕵️ **Odd One Out** | Everyone gets the same secret word except the imposter, who gets a related one (and doesn't know it). One-word clues, a vote, and a last guess. 3+ players. |
-| 🔠 **Categories** | Scattergories-style: each round shows one letter and one category (e.g. **S** + *Animal*). Write something that fits and starts with that letter. Only answers nobody else gave score. |
+| 🔠 **Categories** | Scattergories-style: each round shows one letter and one category (e.g. **S** + *Animal*). Write something that fits and starts with that letter. First come, first served: only the first valid answer scores. |
 
 **Points in answer order:** in Picture, Letters and Classic (and Draw & Guess / Relay) the 1st correct answer gets
 **100**, the 2nd **75**, the 3rd **50**, then 25, 13, 10… A correct answer no longer ends the word: everyone can still
@@ -121,13 +121,15 @@ a player who is away when their turn comes up is skipped.
 ### Categories
 
 1. **Write (30 s):** a letter and a category, e.g. **S** + *Movie*. Type one answer starting with the letter
-   ("the/a/an" are ignored, so *The Shining* counts for S). Answers are saved as you type and stay hidden from the
-   others. Press **Done ✔** when finished; the round moves on when everyone is done or time is up.
-2. **Review (20 s):** everyone's answers are shown. Wrong-letter answers are crossed out automatically. Press 👎 on any
-   answer that doesn't fit the category; if **at least half of the other players** 👎 it, it doesn't count.
-   Press **✔ Looks good** when you're happy (the round ends when everyone has).
-3. **Scoring:** a valid answer nobody else gave → **+100**. If two or more players wrote the same thing (ignoring
-   capitals, spaces and plurals: *Snake* = *snakes*), **none of them** score for it.
+   ("the/a/an" are ignored, so *The Shining* counts for S) and press **Enter / Done ✔**. Answers are ranked in the
+   exact order the server receives them. Everyone sees live *who* has answered and in what order (🥇 Ben answered),
+   but not *what* they wrote. Drafts still being typed when time runs out count, but rank behind every handed-in answer.
+2. **Review (20 s):** the answers are shown in arrival order (#1 at 11.5 s, #2 at 19.8 s…). Wrong-letter answers are
+   crossed out automatically. Press 👎 on any answer that doesn't fit the category; if **at least half of the other
+   players** 👎 it, it doesn't count. Press **✔ Looks good** when you're happy (the round ends when everyone has).
+3. **Scoring — first come, first served:** only **one player per round** scores: the **earliest answer that's still
+   valid** after the review gets **+100**. If #1 had the wrong letter or was voted out, the point goes to #2, and so
+   on. Valid answers that came later score nothing (🐢 *valid, but slower*).
 4. A new letter and a new category each round (hard letters Q, U, V, X, Y, Z are never picked; nothing repeats within a game).
 
 ### Voice answers (Picture mode)

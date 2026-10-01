@@ -207,7 +207,7 @@ function newGame(mode, names = ['A', 'B']) {
   assert.equal(room.phase, 'result');
 }
 
-// Categories: letter + categories, private drafts, auto checks, vetoes, unique vs shared scoring
+// Categories: letter + category, private drafts, auto checks, vetoes, first valid answer wins
 {
   const { CATEGORY_POOL, LETTERS } = await import('./categories.js');
   assert.ok(CATEGORY_POOL.length >= 2 * G.MODES.categories.maxRounds && !LETTERS.includes('Q') && !LETTERS.includes('X'));
@@ -236,51 +236,52 @@ function newGame(mode, names = ['A', 'B']) {
       G.toLobby(r2);
     }
   }
-  const cur = room.current;
-  cur.q = { letter: 'S', categories: ['Animal', 'Food', 'Country', 'Movie'] }; // fixed round for the test
   assert.equal(G.catProblem('  the Shining', 'S'), null);
   assert.equal(G.catProblem('Pizza', 'S'), "doesn't start with S");
   assert.equal(G.catProblem('', 'S'), 'empty');
 
-  // Drafts save, stay private while writing; Done locks a sheet
-  assert.ok(G.submitCategoryAnswers(room, a.id, { answers: ['Snake', 'Sandwich', 'Spain', 'Superman'] }).ok);
-  assert.equal(G.publicState(room).current.answers, null, 'sheets visible while writing');
-  assert.ok(!JSON.stringify(G.publicState(room)).includes('Sandwich'));
-  assert.ok(G.submitCategoryAnswers(room, a.id, { answers: ['Snake', 'Sandwich', 'Spain', 'Superman'], done: true }).ok);
-  assert.equal(G.submitCategoryAnswers(room, a.id, { answers: ['x'] }).ok, false, 'edited after Done');
-  assert.ok(G.submitCategoryAnswers(room, b.id, { answers: ['snakes', 'Sushi', 'Pizza', 'The Shining'], done: true }).ok);
-  // C never presses Done: the deadline moves everyone to review with what C had typed
-  assert.ok(G.submitCategoryAnswers(room, c.id, { answers: ['Seal', 'Sandwich', 'Sweden', 'Shrek'] }).ok);
-  assert.equal(G.wordTimeUp(room), false);
-  assert.equal(cur.step, 'review');
-  assert.equal(G.publicState(room).current.answers[c.id][3], 'Shrek');
-  assert.equal(G.publicState(room).current.problems[b.id][2], "doesn't start with S");
+  // Plays one round with a fixed letter/category. `hand` = [player, answer, done?] in arrival order.
+  const round = (hand, vetoes = []) => {
+    const cur = room.current;
+    cur.q = { letter: 'S', categories: ['Animal'] };
+    for (const [p, text, done = true] of hand) assert.ok(G.submitCategoryAnswers(room, p.id, { answers: [text], done }).ok);
+    if (cur.step === 'write') assert.equal(G.wordTimeUp(room), false); // deadline: move to review
+    assert.equal(cur.step, 'review');
+    for (const [from, to] of vetoes) assert.ok(G.vetoCategoryAnswer(room, from.id, { playerId: to.id, index: 0 }).ok);
+    const ready = [a, b, c].filter(p => p.connected).map(p => G.readyCategories(room, p.id));
+    assert.equal(ready.at(-1).ended, true, 'everyone ready -> scored');
+    return id => cur.results[id][0].status;
+  };
 
-  // Vetoes: not your own, not invalid answers; half of the other players (here 1 of 2) knocks an answer out
-  assert.equal(G.vetoCategoryAnswer(room, c.id, { playerId: c.id, index: 3 }).ok, false);
-  assert.equal(G.vetoCategoryAnswer(room, a.id, { playerId: b.id, index: 2 }).ok, false, 'already invalid');
-  assert.ok(G.vetoCategoryAnswer(room, a.id, { playerId: c.id, index: 3 }).ok); // A doubts "Shrek"
-  assert.ok(G.vetoCategoryAnswer(room, b.id, { playerId: a.id, index: 3 }).ok); // B 👎 "Superman"...
-  assert.ok(G.vetoCategoryAnswer(room, b.id, { playerId: a.id, index: 3 }).ok); // ...and takes it back
-  assert.ok(G.readyCategories(room, a.id).ok);
-  assert.ok(G.readyCategories(room, b.id).ok);
-  assert.equal(G.readyCategories(room, c.id).ended, true, 'everyone ready -> scored');
+  // Round 1: drafts are private; hand-in order is public, the answers are not.
+  assert.ok(G.submitCategoryAnswers(room, c.id, { answers: ['Seal'] }).ok); // C only drafts
+  assert.equal(G.publicState(room).current.answers, null, 'answers visible while writing');
+  assert.ok(!JSON.stringify(G.publicState(room)).includes('Seal'));
+  assert.equal(G.submitCategoryAnswers(room, b.id, { answers: ['Snake'], done: true }).place, 1);
+  assert.equal(G.submitCategoryAnswers(room, b.id, { answers: ['x'] }).ok, false, 'edited after handing in');
+  assert.deepEqual(G.publicState(room).current.done, [b.id]);
+  let st = round([[a, 'Spider'], [c, 'Seal', false]]);
+  // B was first with a valid answer -> only B scores; A was valid but slower; C never handed in -> ranked last
+  assert.deepEqual([st(b.id), st(a.id), st(c.id)], ['winner', 'slower', 'slower']);
+  assert.deepEqual([a.score, b.score, c.score], [0, G.CAT_WIN, 0]);
+  assert.deepEqual(G.publicState(room).current.order.map(o => [o.id, o.late]), [[b.id, false], [a.id, false], [c.id, true]]);
+  assert.equal(G.publicState(room).current.winnerId, b.id);
+  assert.equal(room.history[0].winnerName, 'B');
 
-  const r = cur.results;
-  const st = id => r[id].map(x => x.status);
-  // Animal: Snake / snakes (same once plurals are ignored) / Seal -> A, B shared; C unique
-  // Food: Sandwich / Sushi / Sandwich -> A, C shared; B unique
-  // Country: Spain / Pizza (wrong letter) / Sweden -> A, C unique; B invalid
-  // Movie: Superman / The Shining / Shrek (vetoed by A, 1 of 2 others) -> A, B unique; C invalid
-  assert.deepEqual(st(a.id), ['shared', 'shared', 'unique', 'unique']);
-  assert.deepEqual(st(b.id), ['shared', 'unique', 'invalid', 'unique']);
-  assert.deepEqual(st(c.id), ['unique', 'shared', 'unique', 'invalid']);
-  assert.equal(r[c.id][3].reason, 'voted out');
-  assert.deepEqual([a.score, b.score, c.score], [200, 200, 200]);
-  assert.equal(room.phase, 'result');
-  assert.equal(room.history[0].letter, 'S');
+  // Round 2: the fastest answer has the wrong letter, the 2nd is voted out (1 of 2 other players = half) -> the 3rd wins
+  assert.ok(G.advance(room));
+  st = round([[a, 'Python'], [b, 'Sloth'], [c, 'Swan']], [[c, b]]);
+  assert.deepEqual([st(a.id), st(b.id), st(c.id)], ['invalid', 'invalid', 'winner']);
+  assert.equal(room.current.results[b.id][0].reason, 'voted out');
+  assert.deepEqual([a.score, b.score, c.score], [0, G.CAT_WIN, G.CAT_WIN]);
 
-  // Round 2: one player drops while writing -> once everyone still here is done, review starts
+  // Round 3: a 👎 taken back doesn't count; nobody valid -> nobody scores
+  assert.ok(G.advance(room));
+  st = round([[a, 'Zebra'], [b, ''], [c, 'Shark']], [[a, c], [a, c]]);
+  assert.deepEqual([st(a.id), st(b.id), st(c.id)], ['invalid', 'empty', 'winner']);
+  assert.equal(G.vetoCategoryAnswer(room, a.id, { playerId: a.id, index: 0 }).ok, false, 'veto own answer');
+
+  // Round 4: one player drops while writing -> once everyone still here has handed in, review starts
   assert.ok(G.advance(room));
   c.connected = false;
   G.submitCategoryAnswers(room, a.id, { answers: [], done: true });

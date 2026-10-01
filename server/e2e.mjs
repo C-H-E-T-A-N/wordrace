@@ -267,7 +267,7 @@ console.log(`classic: "${classicWord}" -> Sol +100, Ria +75 (ordered points)`);
 q1.s.disconnect();
 q2.s.disconnect();
 
-// ---- Categories with 3 players, 1 letter + 1 category per round: private answers, auto-check, veto, unique vs shared ----
+// ---- Categories with 3 players, 1 letter + 1 category per round: hand-in order, auto-check, veto, first valid wins ----
 const cat = ['Tia', 'Uma', 'Vic'].map(client);
 await until(() => cat.every(p => p.s.connected));
 const room6 = (await cat[0].emit('create', { name: 'Tia' })).code;
@@ -295,14 +295,15 @@ const playCatRound = async (round, answers, vetoes = []) => {
   await until(() => cat[0].state.phase === 'result');
   return L;
 };
-// Round 1: Tia and Uma write the same thing (different case) -> shared, 0; Vic's is unique -> +100
+// Round 1: Tia hands in first with a valid answer -> only Tia scores; Uma and Vic were valid but slower
 const L1 = await playCatRound(1, ['#apple', '#APPLE', '#vic-one']);
-assert.deepEqual(statuses(), ['shared', 'shared', 'unique']);
-// Round 2: Uma's has the wrong letter; Tia 👎 Vic's (1 of 2 other players = half) -> out; Tia's unique -> +100
-const L2 = await playCatRound(2, ['#tia-two', 'Q#nope', '#vetoed'], [[0, 2]]);
-assert.deepEqual(statuses(), ['unique', 'invalid', 'invalid']);
+assert.deepEqual(statuses(), ['winner', 'slower', 'slower']);
+assert.equal(cat[0].state.current.winnerId, idOfCat(cat[0]));
+// Round 2: Tia (first) has the wrong letter, Uma (second) is 👎'd by Tia + Vic -> out, so Vic (third) wins
+const L2 = await playCatRound(2, ['Q#nope', '#vetoed', '#vic-two'], [[0, 1], [2, 1]]);
+assert.deepEqual(statuses(), ['invalid', 'invalid', 'winner']);
 assert.deepEqual(cat[0].state.players.map(p => p.score), [100, 0, 100]);
-console.log(`categories: letters ${L1}, ${L2} (one category each): shared 0, unique +100, wrong letter and vetoed answers out`);
+console.log(`categories: letters ${L1}, ${L2}: first valid answer wins +100; wrong letter / voted out pass it on`);
 for (const p of cat) p.s.disconnect();
 
 for (const p of [...players, p1, p2]) p.s.disconnect();

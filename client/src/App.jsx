@@ -18,7 +18,7 @@ const MODE_CARDS = [
   { key: 'draw', icon: '🎨', name: 'Draw & Guess', desc: 'Take turns drawing a secret word while the others guess.' },
   { key: 'relay', icon: '🏃', name: 'Relay Draw', desc: 'Only the first artist knows the word; everyone adds a 15 s leg, then all guess.' },
   { key: 'imposter', icon: '🕵️', name: 'Odd One Out', desc: 'One player has a different word. Give clues, vote out the imposter. 3+ players.' },
-  { key: 'categories', icon: '🔠', name: 'Categories', desc: 'A letter + a category: name something that fits. Only answers nobody else gives score!' },
+  { key: 'categories', icon: '🔠', name: 'Categories', desc: 'A letter + a category: name something that fits. First valid answer wins the round!' },
 ];
 const QUIZ_MODES = ['picture', 'letters', 'classic'];
 const MEDALS = ['🥇', '🥈', '🥉'];
@@ -518,7 +518,9 @@ const startsWith = (text, letter) => {
   const w = text.trim().replace(/^(the|a|an)\s+/i, '').toLowerCase().replace(/[^a-z0-9]/g, '');
   return !w || w[0] === letter.toLowerCase();
 };
-const CAT_STATUS = { unique: '✅', shared: '👥', invalid: '❌', empty: '·' };
+const CAT_STATUS = { winner: '🏆', slower: '🐢', invalid: '❌', empty: '·' };
+const CAT_NOTE = { winner: r => `+${r.points}`, slower: () => 'valid, but slower', invalid: r => r.reason, empty: () => 'no answer' };
+const secsText = ms => `${(ms / 1000).toFixed(1)}s`;
 
 function CategoriesGame({ game, me }) {
   const now = useNow();
@@ -526,6 +528,7 @@ function CategoriesGame({ game, me }) {
   const open = game.phase === 'round';
   const [answers, setAnswers] = useState(() => c.categories.map(() => ''));
   const [done, setDone] = useState(false);
+  const [place, setPlace] = useState(null); // my position in the hand-in order
   const [error, setError] = useState('');
   const saveTimer = useRef(null);
   const secs = Math.max(0, Math.ceil((game.endsAt - now) / 1000));
@@ -540,7 +543,7 @@ function CategoriesGame({ game, me }) {
     return () => clearTimeout(saveTimer.current);
   }, []);
 
-  const send = (event, value, then) => socket.emit(event, value, res => (res.ok ? (setError(''), then?.()) : setError(res.error)));
+  const send = (event, value, then) => socket.emit(event, value, res => (res.ok ? (setError(''), then?.(res)) : setError(res.error)));
   // Drafts are saved as you type, so whatever is in the boxes when time runs out still counts.
   const change = (i, v) => {
     const next = answers.map((a, k) => (k === i ? v : a));
@@ -548,7 +551,14 @@ function CategoriesGame({ game, me }) {
     clearTimeout(saveTimer.current);
     saveTimer.current = setTimeout(() => socket.emit('cat:answers', { answers: next }), 300);
   };
-  const finish = () => { clearTimeout(saveTimer.current); send('cat:answers', { answers, done: true }, () => setDone(true)); };
+  const finish = () => {
+    clearTimeout(saveTimer.current);
+    send('cat:answers', { answers, done: true }, res => { setDone(true); setPlace(res.place); });
+  };
+  const ordinal = n => `${n}${['th', 'st', 'nd', 'rd'][n % 100 > 10 && n % 100 < 14 ? 0 : n % 10] ?? 'th'}`;
+  // Everyone in the order the server ranked them (hand-in order; late drafts at the end)
+  const ranked = c.order?.length ? c.order : c.done.map(id => ({ id }));
+  const winner = c.winnerId && { name: nameOf(c.winnerId), text: c.results?.[c.winnerId]?.[0]?.text };
 
   const stepLabel = { write: '✍️ Write', review: '🔍 Review', reveal: '🏁 Scores' }[c.step];
 
@@ -571,7 +581,7 @@ function CategoriesGame({ game, me }) {
         </div>
         {c.step === 'write' && (
           <>
-            <p className="muted center">Name a <b>{c.categories[0]}</b> starting with <b>{c.letter}</b>. Only answers nobody else gives will score!</p>
+            <p className="muted center">Name a <b>{c.categories[0]}</b> starting with <b>{c.letter}</b>. ⚡ First come, first served: the first valid answer wins!</p>
             {/* One category per round; Enter = Done */}
             <form className="answer" onSubmit={e => { e.preventDefault(); if (writing && !done) finish(); }}>
               <input value={answers[0]} maxLength={30} disabled={!writing || done} autoFocus
@@ -581,24 +591,31 @@ function CategoriesGame({ game, me }) {
               <button className="btn primary" disabled={!writing || done}>Done ✔</button>
             </form>
             {answers[0] && !startsWith(answers[0], c.letter) && <p className="bad-text">That doesn't start with {c.letter}!</p>}
-            {done && <p className="muted">✔ Handed in. Waiting for the others ({c.done.length}/{connected})…</p>}
+            {done && <p className="muted">✔ Handed in{place ? ` ${ordinal(place)}` : ''}. Waiting for the others ({c.done.length}/{connected})…</p>}
+            {c.done.length > 0 && (
+              <div className="solved-strip">
+                {c.done.map((id, i) => <span key={id}>{MEDALS[i] ?? `#${i + 1}`} {nameOf(id)}{id === me && ' (you)'} answered</span>)}
+              </div>
+            )}
           </>
         )}
 
         {c.step === 'review' && (
           <>
-            <p className="muted center">Check everyone's answers. 👎 anything that doesn't fit the category.
-              Half of the other players 👎 = it doesn't count.</p>
+            <p className="muted center">Answers in the order they came in. 👎 anything that doesn't fit the category
+              (half of the other players 👎 = out). The first answer still standing wins.</p>
             {c.categories.map((cat, i) => (
               <section key={cat} className="cat-review">
                 <h4>{cat}</h4>
                 <ul>
-                  {game.players.map(p => {
+                  {ranked.map((o, rank) => {
+                    const p = { id: o.id, name: nameOf(o.id) };
                     const text = c.answers[p.id]?.[i] ?? '';
                     const problem = c.problems[p.id]?.[i];
                     const by = c.vetoes.find(v => v.playerId === p.id && v.index === i)?.by ?? [];
                     return (
                       <li key={p.id} className={problem ? 'bad' : ''}>
+                        <span className="rank">#{rank + 1}<small>{o.late ? "time's up" : o.ms != null ? secsText(o.ms) : ''}</small></span>
                         <span className="who">{p.name}{p.id === me && ' (you)'}</span>
                         <span className="ans">{text || '—'}</span>
                         {problem && problem !== 'empty' && <small>{problem}</small>}
@@ -623,18 +640,21 @@ function CategoriesGame({ game, me }) {
       {game.phase === 'result' && c.results && (
         <div className="overlay">
           <div className="card result cat-result">
-            <h2>🔠 Letter {c.letter}</h2>
+            <h2>{winner ? (c.winnerId === me ? '🏆 You were first!' : `🏆 ${winner.name} was first!`) : '😶 Nobody scored'}</h2>
+            {winner && <p className="answer-reveal">{winner.text}</p>}
+            <p className="muted">{c.letter} · {c.categories.join(' · ')}</p>
             {c.categories.map((cat, i) => (
               <section key={cat} className="cat-review">
                 <h4>{cat}</h4>
                 <ul>
-                  {game.players.map(p => {
-                    const r = c.results[p.id]?.[i];
+                  {ranked.map((o, rank) => {
+                    const r = c.results[o.id]?.[i];
                     return r && (
-                      <li key={p.id} className={r.status}>
-                        <span className="who">{p.name}</span>
+                      <li key={o.id} className={r.status}>
+                        <span className="rank">#{rank + 1}</span>
+                        <span className="who">{nameOf(o.id)}</span>
                         <span className="ans">{CAT_STATUS[r.status]} {r.text || '—'}</span>
-                        <small>{r.status === 'unique' ? `+${r.points}` : r.status === 'shared' ? 'same as someone' : r.reason ?? ''}</small>
+                        <small>{CAT_NOTE[r.status](r)}</small>
                       </li>
                     );
                   })}

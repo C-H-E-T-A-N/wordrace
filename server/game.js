@@ -39,7 +39,7 @@ export const MODES = {
     name: 'Classic', rounds: 4, maxRounds: 10, wordsPerRound: 1, wordMs: 30_000, overtime: false,
     showEmoji: true, hide: { from: 0.4, to: 0.4 }, showHint: true, input: 'text',
   },
-  // Scattergories-style: each round 1 letter + 1 category; write an answer, review/veto, unique answers score.
+  // Scattergories-style: each round 1 letter + 1 category; the first valid answer (after review/vetoes) scores.
   categories: {
     name: 'Categories', rounds: 5, maxRounds: 15, wordsPerRound: 1, overtime: false, input: 'categories',
     writeMs: 30_000, reviewMs: 20_000,
@@ -451,9 +451,11 @@ function finishImposter(room, now, outcome) {
   room.phaseEndsAt = now + ROUND_END_MS;
 }
 
-// ---------- Categories (Scattergories-style) ----------
+// ---------- Categories (Scattergories-style, first come first served) ----------
+// One letter + one category. Answers are ranked by the order the server receives them; after the review, only the
+// earliest answer that's still valid scores. Everyone else scores nothing that round.
 
-export const CAT_UNIQUE = 100; // a valid answer nobody else gave
+export const CAT_WIN = 100; // the first valid answer of the round
 const CAT_RESULT_MS = 6_000;
 
 function startCategories(room, q, now) {
@@ -461,22 +463,24 @@ function startCategories(room, q, now) {
     q, // { letter, categories }
     step: 'write', // write -> review -> locked
     stepMs: MODES.categories.writeMs,
+    startedAt: now,
     answers: new Map(), // playerId -> string[] (latest draft; hidden until review)
-    done: new Set(),
+    draftAt: new Map(), // playerId -> when the draft was last saved
+    order: [], // [{ id, at, late }] hand-in order (Node handles one event at a time, so this is arrival order)
     vetoes: new Map(), // "playerId:index" -> Set(voterIds)
     ready: new Set(),
     results: null,
+    winners: [], // per category: playerId of the first valid answer, or null
     locked: false,
   };
   room.phase = 'round';
   room.phaseEndsAt = now + MODES.categories.writeMs;
 }
 
-// "The Shining", "a Snake" -> checked as "shining", "snake"; plurals match singulars when comparing players.
+const handedIn = (c, id) => c.order.some(o => o.id === id);
+
+// "The Shining", "a Snake" -> checked as "shining", "snake".
 const catWord = text => String(text ?? '').trim().replace(/^(the|a|an)\s+/i, '');
-const catKey = text => normalize(catWord(text));
-// Two answers are "the same" if they match exactly or one is a plural of the other (snake/snakes, cherry/cherries).
-const sameAnswer = (x, y) => x === y || plurals(x).includes(y) || plurals(y).includes(x);
 
 // Why an answer can't count before anyone votes on it (null = fine so far).
 export function catProblem(text, letter) {
@@ -487,22 +491,28 @@ export function catProblem(text, letter) {
   return null;
 }
 
-// Drafts are saved as players type, so whatever is there at the deadline counts. `done` locks your sheet.
+// Drafts are saved as players type; `done` hands the answer in and fixes its place in the queue.
 export function submitCategoryAnswers(room, playerId, { answers, done } = {}, now = Date.now()) {
   const c = room.current;
   if (room.mode !== 'categories' || room.phase !== 'round' || c.locked || c.step !== 'write')
     return { ok: false, error: 'Answers are closed.' };
   if (!playerById(room, playerId)) return { ok: false, error: 'You are not in this game.' };
-  if (c.done.has(playerId)) return { ok: false, error: 'You already handed in your answers.' };
+  if (handedIn(c, playerId)) return { ok: false, error: 'You already handed in your answer.' };
   if (!Array.isArray(answers)) return { ok: false, error: 'Bad answers.' };
   c.answers.set(playerId, c.q.categories.map((_, i) => String(answers[i] ?? '').trim().slice(0, 30)));
-  if (done) c.done.add(playerId);
-  if (done && everyone(room, id => c.done.has(id))) { startReview(room, now); return { ok: true, ended: false }; }
-  return { ok: true, ended: false };
+  c.draftAt.set(playerId, now);
+  if (done) {
+    c.order.push({ id: playerId, at: now });
+    if (everyone(room, id => handedIn(c, id))) startReview(room, now);
+  }
+  return { ok: true, ended: false, place: done ? c.order.length : null };
 }
 
 function startReview(room, now) {
   const c = room.current;
+  // Drafts never handed in queue up behind everyone who pressed Done, in the order they were last edited.
+  const late = [...c.answers.keys()].filter(id => !handedIn(c, id)).sort((a, b) => c.draftAt.get(a) - c.draftAt.get(b));
+  for (const id of late) c.order.push({ id, at: now, late: true });
   c.step = 'review';
   c.stepMs = MODES.categories.reviewMs;
   room.phaseEndsAt = now + c.stepMs;
@@ -540,32 +550,38 @@ function vetoedOut(room, playerId, index) {
   return others > 0 && votes >= Math.ceil(others / 2);
 }
 
+// Walk the answers in hand-in order: the first valid one wins CAT_WIN; valid later ones were simply too slow.
 function scoreCategories(room, now) {
   const c = room.current;
   const { letter, categories } = c.q;
-  const results = {}; // playerId -> [{ text, status: unique|shared|invalid|empty, reason, points }]
-  categories.forEach((_, i) => {
-    const entries = room.players.map(p => {
-      const text = c.answers.get(p.id)?.[i] ?? '';
+  const ranked = [...c.order.map(o => o.id), ...room.players.map(p => p.id).filter(id => !handedIn(c, id))];
+  const results = {}; // playerId -> [{ text, status: winner|slower|invalid|empty, reason, points }]
+  c.winners = categories.map((_, i) => {
+    let winner = null;
+    for (const id of ranked) {
+      const p = playerById(room, id);
+      if (!p) continue; // left the room
+      const text = c.answers.get(id)?.[i] ?? '';
       const problem = catProblem(text, letter);
-      const status = problem === 'empty' ? 'empty' : problem ? 'invalid' : vetoedOut(room, p.id, i) ? 'invalid' : 'ok';
-      return { p, text, status, reason: problem && problem !== 'empty' ? problem : status === 'invalid' ? 'voted out' : null };
-    });
-    const valid = entries.filter(e => e.status === 'ok');
-    for (const e of valid) e.shared = valid.some(o => o !== e && sameAnswer(catKey(o.text), catKey(e.text)));
-    for (const e of entries) {
-      if (e.status === 'ok') e.status = e.shared ? 'shared' : 'unique';
-      const points = e.status === 'unique' ? CAT_UNIQUE : 0;
-      e.p.score += points;
-      (results[e.p.id] ??= []).push({ text: e.text, status: e.status, reason: e.reason, points });
+      let status = problem === 'empty' ? 'empty' : problem || vetoedOut(room, id, i) ? 'invalid' : 'valid';
+      if (status === 'valid') status = winner ? 'slower' : ((winner = id), 'winner');
+      const points = status === 'winner' ? CAT_WIN : 0;
+      p.score += points;
+      const reason = problem && problem !== 'empty' ? problem : status === 'invalid' ? 'voted out' : null;
+      (results[id] ??= []).push({ text, status, reason, points });
     }
+    return winner;
   });
   c.results = results;
   c.locked = true;
+  const winnerId = c.winners[0];
   room.history.push({
     emoji: '🔠',
     answer: letter,
     letter,
+    category: categories.join(' · '),
+    winnerName: winnerId ? nameOf(room, winnerId) : null,
+    winnerText: winnerId ? results[winnerId][0].text : null,
     players: room.players.map(p => ({ name: p.name, points: (results[p.id] ?? []).reduce((n, r) => n + r.points, 0) })),
   });
   room.phase = 'result';
@@ -573,7 +589,7 @@ function scoreCategories(room, now) {
 }
 
 export const categorySync = (room, playerId) =>
-  room.mode === 'categories' && room.current ? { answers: room.current.answers.get(playerId) ?? null, done: room.current.done.has(playerId) } : {};
+  room.mode === 'categories' && room.current ? { answers: room.current.answers.get(playerId) ?? null, done: handedIn(room.current, playerId) } : {};
 
 // ---------- shared: someone dropped or left mid-round ----------
 
@@ -588,7 +604,7 @@ export function playerGone(room, playerId, now = Date.now()) {
     return false;
   }
   if (room.mode === 'categories') {
-    if (c.step === 'write' && everyone(room, id => c.done.has(id))) { startReview(room, now); return false; }
+    if (c.step === 'write' && everyone(room, id => handedIn(c, id))) { startReview(room, now); return false; }
     if (c.step === 'review' && everyone(room, id => c.ready.has(id))) { scoreCategories(room, now); return true; }
     return false;
   }
@@ -852,12 +868,14 @@ function publicCurrent(room) {
       stepMs: c.stepMs,
       letter: c.q.letter,
       categories: c.q.categories,
-      done: [...c.done],
+      done: c.order.filter(o => !o.late).map(o => o.id), // hand-in order, visible live (not what they wrote)
+      order: c.order.map(o => ({ id: o.id, ms: o.at - c.startedAt, late: !!o.late })),
       ready: [...c.ready],
       answers: sheets,
       problems: shown ? Object.fromEntries(Object.entries(sheets).map(([id, list]) => [id, list.map(t => catProblem(t, c.q.letter))])) : null,
       vetoes: shown ? [...c.vetoes].map(([key, set]) => { const [playerId, index] = key.split(':'); return { playerId, index: +index, by: [...set] }; }) : null,
       results: c.results,
+      winnerId: c.locked ? c.winners[0] : null,
     };
   }
   if (room.mode === 'imposter') {
