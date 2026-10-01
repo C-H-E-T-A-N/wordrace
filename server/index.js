@@ -47,14 +47,30 @@ function schedule(room, ms, fn) {
   room.timer = setTimeout(() => { fn(); broadcast(room); }, ms);
 }
 function beginWord(room) {
-  // No auto-skip: when the time is up the word just goes into overtime and waits for a correct answer or a host skip.
-  schedule(room, G.WORD_MS, () => G.startOvertime(room));
+  // Picture/Letters: time-up pauses the word (overtime) until solved or skipped. Classic, Draw & Guess: time-up ends it.
+  schedule(room, G.modeOf(room).wordMs, () => { if (G.wordTimeUp(room)) afterWord(room); });
+  sendSecret(room);
 }
 function afterWord(room) {
   schedule(room, room.phaseEndsAt - Date.now(), () => {
-    if (room.wordNo < G.WORDS_PER_GAME) { G.nextWord(room); beginWord(room); }
-    else room.phase = 'final';
+    if (G.advance(room)) beginWord(room);
+    else G.finishGame(room);
   });
+}
+
+// Draw & Guess: the secret word goes to the drawer's socket only, never to the room.
+function sendSecret(room) {
+  if (!G.isDraw(room) || room.phase !== 'round') return;
+  const drawer = room.players.find(p => p.id === room.current.drawerId);
+  if (drawer?.socketId) {
+    const { word, emoji } = G.drawSync(room, drawer.id);
+    io.to(drawer.socketId).emit('draw-game:word', { word, emoji, drawerId: drawer.id, round: room.wordNo });
+  }
+}
+
+// A player dropped or left mid-turn: end the turn if they were drawing, or if everyone left has already guessed.
+function playerGone(room, playerId) {
+  if (G.drawerGone(room, playerId) || G.checkAllGuessed(room)) afterWord(room);
 }
 
 // --- connection bookkeeping ---
@@ -78,8 +94,12 @@ function removePlayer(room, playerId, message) {
   room.players = room.players.filter(p => p !== player);
   if (!room.players.length) { clearTimeout(room.timer); rooms.delete(room.code); return; }
   if (room.hostId === playerId) room.hostId = room.players[0].id;
-  // A 3-player game carries on with 2; below that, back to the lobby.
+  // A game carries on while at least 2 players are left; below that, back to the lobby.
   if (room.phase !== 'lobby' && room.players.length < G.MIN_PLAYERS) { clearTimeout(room.timer); G.toLobby(room); }
+  else if (room.phase !== 'lobby') {
+    G.checkHint(room); // the leaver may have been the last one not asking for a hint
+    playerGone(room, playerId);
+  }
   notice(room, message);
   broadcast(room);
 }
@@ -166,10 +186,68 @@ io.on('connection', socket => {
   socket.on('skip', (cb = () => {}) => {
     const { room, player } = lookup(socket);
     if (!player || room.hostId !== player.id) return cb({ ok: false, error: 'Only the host can skip a word.' });
-    if (!G.skipWord(room)) return cb({ ok: false, error: 'You can skip once the 15 seconds are up.' });
+    if (!G.skipWord(room)) return cb({ ok: false, error: 'You can skip once the time is up.' });
     cb({ ok: true });
     afterWord(room);
     broadcast(room);
+  });
+
+  socket.on('setMode', (mode, cb = () => {}) => {
+    const { room, player } = lookup(socket);
+    if (!player || room.hostId !== player.id) return cb({ ok: false, error: 'Only the host can pick the mode.' });
+    if (!G.setMode(room, mode)) return cb({ ok: false, error: 'The mode can only be changed between games.' });
+    cb({ ok: true });
+    broadcast(room);
+  });
+
+  socket.on('setDrawTurns', (n, cb = () => {}) => {
+    const { room, player } = lookup(socket);
+    if (!player || room.hostId !== player.id) return cb({ ok: false, error: 'Only the host can change this.' });
+    if (!G.setDrawTurns(room, n)) return cb({ ok: false, error: 'Can only be changed between games.' });
+    cb({ ok: true });
+    broadcast(room);
+  });
+
+  socket.on('toLobby', (cb = () => {}) => {
+    const { room, player } = lookup(socket);
+    if (!player || room.hostId !== player.id) return cb({ ok: false, error: 'Only the host can do that.' });
+    if (room.phase !== 'final') return cb({ ok: false, error: 'Finish the game first.' });
+    G.toLobby(room);
+    cb({ ok: true });
+    broadcast(room);
+  });
+
+  // --- Draw & Guess ---
+  socket.on('draw-game:guess', (text, cb = () => {}) => {
+    const { room, player } = lookup(socket);
+    if (!player) return cb({ correct: false, reason: 'closed' });
+    const result = G.submitDrawGuess(room, player.id, text);
+    cb(result); // only the guesser learns the word here
+    if (result.correct) io.to(room.code).emit('draw-game:correct', { name: player.name, points: result.points });
+    if (result.ended) afterWord(room);
+    if (!result.reason) broadcast(room); // guess feed and scores changed
+  });
+
+  socket.on('draw-game:stroke', segments => {
+    const { room, player } = lookup(socket);
+    const clean = player && G.addStrokes(room, player.id, segments);
+    if (clean) socket.to(room.code).emit('draw-game:stroke', clean);
+  });
+
+  socket.on('draw-game:clear', () => {
+    const { room, player } = lookup(socket);
+    if (player && G.clearStrokes(room, player.id)) socket.to(room.code).emit('draw-game:clear');
+  });
+
+  // Canvas + (if allowed) the secret word, for a player who just (re)loaded the turn.
+  socket.on('draw-game:sync', (_, cb = () => {}) => {
+    const { room, player } = lookup(socket);
+    cb(player ? G.drawSync(room, player.id) : { strokes: [], word: null });
+  });
+
+  socket.on('hint', () => {
+    const { room, player } = lookup(socket);
+    if (player && G.voteHint(room, player.id)) broadcast(room);
   });
 
   socket.on('typing', () => {
@@ -184,6 +262,8 @@ io.on('connection', socket => {
     if (!player || player.socketId !== socket.id) return;
     player.connected = false;
     player.socketId = null;
+    G.checkHint(room); // don't make the others wait for someone who's gone
+    playerGone(room, player.id);
     player.dropTimer = setTimeout(
       () => removePlayer(room, player.id, `${player.name} did not come back and was removed.`),
       RECONNECT_MS,

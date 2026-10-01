@@ -1,13 +1,21 @@
 # ⚡ Word Race
 
-A 2–3 player, real-time "guess the word" party game for two devices on the same Wi-Fi.
-A game has **3 rounds of 3 words**. Each word is just a picture (emoji) over a row of letter boxes with some letters missing.
-There's no text hint, only the picture. Type straight into the empty boxes; the first player to fill them in correctly
-scores. Each round hides more letters: **Easy**, then **Medium**, then **Hard**. The final screen shows how many words each
-player guessed, and which ones. **Play Again** always deals 9 new words.
+A real-time multiplayer party game for **2–8 players** on phones and computers, either on the same Wi-Fi or online.
+One room, one lobby: the host picks one of four game modes.
+
+| Mode | How it plays |
+|---|---|
+| 🖼️ **Picture** | Only a picture (emoji). Type what it is, or press 🎤 and **say it**. Stuck? When **every player** presses *Ask for a hint*, a one-line hint appears. 3 rounds × 3 words. |
+| 🔤 **Letters** | No picture, just the word with missing letters. Type straight into the empty boxes. Each round hides more letters (Easy → Medium → Hard). 3 rounds × 3 words. |
+| ⚡ **Classic** | Picture + hint + word with missing letters, type it in the box and Submit. 4 rounds, 30 s each; if time runs out nobody scores. |
+| 🎨 **Draw & Guess** | Pictionary. Players take turns drawing a secret word on a shared canvas while everyone else guesses. Points for fast guessers and for the drawer. |
+
+In Picture and Letters, a word doesn't skip when its 15 s run out: it pauses (⏸) so everyone can keep guessing,
+and the host may skip it. Every finished game is saved to the room's **leaderboard** (wins, games, words guessed,
+best Draw & Guess score) and the list of past games, shown in the lobby and on the end screen.
 
 - **client/**: React + Vite
-- **server/**: Node.js + Express + Socket.IO. The server is the source of truth: it picks the questions, checks answers, awards points and runs the timers.
+- **server/**: Node.js + Express + Socket.IO. The server is the source of truth: it picks the words, checks every answer, awards points, runs the timers and decides whose turn it is.
 
 ## Play online (free hosting)
 
@@ -15,12 +23,12 @@ player guessed, and which ones. **Play Again** always deals 9 new words.
 
 `render.yaml` sets this up as a free Render web service. All players open the `https://….onrender.com` URL Render gives you,
 from any network. Free instances sleep after 15 minutes idle, so the first visit afterwards takes ~50 s to wake up,
-and a restart ends any running games (rooms are kept in memory).
+and a restart ends running games and clears room leaderboards (rooms are kept in memory).
 
 ## Requirements
 
 - [Node.js](https://nodejs.org) 18 or newer (check with `node -v`)
-- 2–3 devices on the **same Wi-Fi / LAN** (phones work too)
+- 2–8 devices on the **same Wi-Fi / LAN** (phones work too)
 
 ## Run it
 
@@ -43,15 +51,37 @@ Open the game from another device on the same Wi-Fi:
    dev:   http://192.168.1.10:5173      (npm run dev)
 ```
 
-## Play on two devices
+## Play on two or more devices (same Wi-Fi)
 
 1. **Host computer:** open `http://localhost:5173`, type your name and click **Create Room**.
    The lobby shows a 4-letter room code and the LAN link.
-2. **Other devices** (on the same Wi-Fi): open `http://<host-LAN-IP>:5173` (e.g. `http://192.168.1.10:5173`),
-   enter a name and the room code, and click **Join Room**. You can also open the `/?room=CODE` link shown in the lobby.
-3. Once at least 2 players are connected (green), the host clicks **Start Game**. A 3rd player is optional.
+2. **Every other device** (same Wi-Fi): open `http://<host-LAN-IP>:5173` (e.g. `http://192.168.1.10:5173`),
+   enter a name and the room code, and click **Join Room**. Or open the `/?room=CODE` link shown in the lobby.
+3. The host picks a **game mode** (everyone sees the choice) and clicks **Start**. At least 2 connected players are needed.
+4. After the game: **Play Again** deals brand-new words in the same mode; the host's **Back to lobby** lets you switch modes.
 
-To test on one computer, use 2 or 3 browser tabs. Each tab is a separate player.
+To test on one computer, open several browser tabs. Each tab is a separate player.
+
+### Draw & Guess on several devices
+
+1. In the lobby the host selects **🎨 Draw & Guess** and, optionally, **Turns per player** (1, 2 or 3).
+   With 3 players and 2 turns each the drawing order is A → B → C → A → B → C (join order).
+2. **The drawer** sees *Your word:* and draws it on the canvas with a finger or the mouse:
+   4 brush sizes, 8 colours, eraser and clear. Phones work well as drawing pads.
+3. **Everyone else** watches the drawing appear live and types guesses below it. Wrong guesses appear in the
+   feed for all to see; a correct guess is announced (*🎉 Ana guessed it!*) without revealing the word,
+   and that player can't guess again but keeps watching.
+4. A turn ends when **everyone has guessed** or after **60 s**. The result card shows the word and the points.
+
+Scoring: 1st correct guesser **+100**, 2nd **+75**, 3rd **+50**, later ones less. The drawer gets up to **+100**,
+in proportion to how many guessers got it. If the drawer disconnects, their turn ends at once and the next player draws;
+a player who is away when their turn comes up is skipped.
+
+### Voice answers (Picture mode)
+
+🎤 uses the browser's speech recognition (Chrome, Edge, Safari). Browsers only allow the microphone on **https** pages
+or `localhost`, so it works on the online (Render) link and on the host computer, but **not** on other devices
+using the plain `http://192.168…` LAN address. Those players can type instead. "a penguin", "penguins", "Penguin" all count.
 
 ### Finding the host's LAN IP on Windows
 
@@ -65,13 +95,13 @@ Find your Wi-Fi adapter ("Wireless LAN adapter Wi-Fi") and use its **IPv4 Addres
 
 (macOS: `ipconfig getifaddr en0` · Linux: `hostname -I`)
 
-### If the second device can't connect
+### If another device can't connect
 
 - **Windows Firewall:** the first time Node starts, Windows asks whether to allow it. Tick **Private networks** and click Allow.
   If you dismissed the prompt, go to *Windows Security → Firewall & network protection → Allow an app through firewall*
   and allow **Node.js JavaScript Runtime** on Private networks.
 - Your Wi-Fi network profile should be **Private**, not Public (*Settings → Network & Internet → Wi-Fi → your network*).
-- Both devices must be on the same network. Guest Wi-Fi networks often block devices from talking to each other.
+- All devices must be on the same network. Guest Wi-Fi networks often block devices from talking to each other.
 - Use `http://`, not `https://`.
 
 ## Production-style run (optional)
@@ -83,7 +113,7 @@ npm run build
 npm start
 ```
 
-Then open `http://<host-LAN-IP>:3001` on both devices.
+Then open `http://<host-LAN-IP>:3001` on every device.
 
 ## Tests
 
@@ -91,25 +121,32 @@ Then open `http://<host-LAN-IP>:3001` on both devices.
 npm test
 ```
 
-This checks the question pool (270 questions, all unique), answer normalization, hidden-letter patterns,
-no-repeat dealing across 90 games, harder patterns each round, the pause/skip rules, and the race where two or three players answer correctly at nearly the same moment
-(only the first gets the point).
+Checks the game rules without a network: the question pools (270 quiz questions, 170 drawing words, all unique),
+answer matching, letter patterns, no repeats across many games for both pools, every mode's flow, hint voting,
+Draw & Guess rotation / scoring / secrecy / disconnects, and the leaderboard.
+
+With `npm run dev` running, this plays real multiplayer games over Socket.IO with 4 clients
+(simultaneous guesses, drawer and guesser disconnects, reconnects, Play Again, secret word never sent to guessers):
+
+```bash
+node server/e2e.mjs
+```
 
 ## How it works
 
 | Topic | Behavior |
 |---|---|
-| **Rooms** | 4-letter code, 2–3 players, stored in server memory |
-| **Questions** | 270 questions in 10 categories (`server/questions.js`). Each room shuffles the whole pool once and deals from it in order. `usedItems` / `usedWords` sets reject anything already played. When the pool runs out, it reshuffles but still excludes the last game. |
-| **Hidden letters** | Generated fresh for each word. Round 1 hides ~35% of the letters, round 2 ~60%, round 3 ~85%. The first letter always stays visible (`HIDE_BY_ROUND` in `server/game.js`). |
-| **Letter boxes** | Focus jumps to the next empty box as you type, and Backspace goes back. The guess is sent as soon as every box is filled. A wrong guess shakes and clears the boxes. |
-| **Answers** | Case, spaces and punctuation are ignored. Typing the full word or only the missing letters both count. |
-| **Race condition** | Node processes socket events one at a time. The first correct answer locks the word, and every later submission is rejected. |
-| **Timer** | 15 s per word. When it runs out, the word is **not** skipped: it pauses (⏸) and everyone can keep guessing. Only the host can skip a word, and only after the 15 s are up. After each word there's a 3 s result screen (5 s at the end of a round). The server runs the clock, and clients receive the *remaining* time, so device clocks don't need to match. |
-| **Answer secrecy** | The correct word is only sent to browsers after the word is locked |
+| **Rooms** | 4-letter code, 2–8 players, stored in server memory. Mode and turns-per-player are room settings only the host can change, between games. |
+| **Word pools** | Quiz modes: 270 questions in 10 categories (`server/questions.js`). Draw & Guess: its own list of easy-to-draw words in 11 categories (`server/drawWords.js`). Each room shuffles each pool once and deals from it in order; `usedItems` / `usedWords` sets reject anything already played. When a pool runs out it reshuffles but still excludes the game just played. |
+| **Answers** | Case, spaces, punctuation, a leading "a/an/the" and simple plurals are ignored. In Letters/Classic, typing only the missing letters also counts. Voice input sends the recogniser's alternatives and the server checks each. |
+| **Race condition** | Node processes socket events one at a time. The first correct answer locks the word, so later ones get nothing. In Draw & Guess, the order correct guesses arrive in decides 100 / 75 / 50. |
+| **Secrets** | Answers are only sent to everyone once a word or turn is over. The Draw & Guess word goes only to the drawer's socket (`draw-game:word`), and to a guesser only in the reply to their own correct guess. |
+| **Drawing sync** | The drawer's strokes are small segments `{x, y, px, py, w, c, t}` in 0–1 coordinates (any screen size), batched ~30 times a second (`draw-game:stroke`). The server only accepts them from the current drawer, validates them, relays them to the room and keeps them so a refreshed player gets the picture back (`draw-game:sync`). `draw-game:clear` wipes it. |
+| **Timers** | Run on the server; clients get the *remaining* time so device clocks don't matter. Picture/Letters 15 s (then pause), Classic 30 s, Draw & Guess 60 s. |
 | **Refresh / reconnect** | Each tab remembers its room and player ID in `sessionStorage` and rejoins automatically. A dropped player keeps their seat for 60 s while the others see "*X disconnected. Waiting for them to reconnect...*". |
-| **Leaving** | If a player leaves or doesn't return within 60 s, a 3-player game continues with 2; with fewer than 2 players it returns to the lobby. If the host left, the other player becomes host. |
-| **Errors** | Invalid room code, full room and duplicate name each show a friendly message |
+| **Leaving** | A game carries on while 2+ players remain; below that it returns to the lobby. If the host leaves, the next player becomes host. |
+| **Leaderboard** | Kept per room by player name (survives leaving and rejoining the room), newest 50 games. |
+| **Errors** | Invalid room code, full room and duplicate name each show a friendly message. |
 
-Settings are at the top of `server/game.js` (`ROUNDS`, `WORDS_PER_ROUND`, `WORD_MS`, `HIDE_BY_ROUND`, …). Change the server port with the
+Settings are at the top of `server/game.js` (`MODES`, `GUESS_POINTS`, `DRAWER_MAX`, `MAX_PLAYERS`, …). Change the server port with the
 `GAME_PORT` environment variable, and update the proxy target in `client/vite.config.js` to match.
