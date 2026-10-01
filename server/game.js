@@ -3,12 +3,16 @@ import { randomUUID } from 'node:crypto';
 import { POOL } from './questions.js';
 import { DRAW_POOL } from './drawWords.js';
 import { IMPOSTER_POOL } from './imposterPairs.js';
+import { CATEGORY_POOL, LETTERS } from './categories.js';
 
 export const MAX_PLAYERS = 8;
 export const MIN_PLAYERS = 2;
 export const RESULT_MS = 3_000; // pause after each word
 export const ROUND_END_MS = 5_000; // longer pause after the last word of a round / after a drawing turn
-export const GUESS_POINTS = [100, 75, 50]; // Draw & Guess: 1st, 2nd, 3rd correct guesser; later ones get the last value / 2
+export const GUESS_POINTS = [100, 75, 50]; // 1st, 2nd, 3rd correct answer in every guessing mode; later ones keep halving
+export const LAST_CALL_MS = 5_000; // Picture/Letters: once someone solves a paused word, the others get this long
+// Points for the (n+1)-th correct answer: 100, 75, 50, 25, 13, 10, 10…
+export const pointsFor = n => GUESS_POINTS[n] ?? Math.max(10, Math.round(GUESS_POINTS.at(-1) / 2 ** (n - GUESS_POINTS.length + 1)));
 export const DRAWER_MAX = 100; // Draw & Guess / Relay: (starting) drawer gets this share-weighted by how many guessers got it
 // Odd One Out points
 export const IMPOSTER_ESCAPES = 3; // imposter not caught
@@ -34,6 +38,11 @@ export const MODES = {
   classic: {
     name: 'Classic', rounds: 4, maxRounds: 10, wordsPerRound: 1, wordMs: 30_000, overtime: false,
     showEmoji: true, hide: { from: 0.4, to: 0.4 }, showHint: true, input: 'text',
+  },
+  // Scattergories-style: a letter + 6 categories; write answers, review/veto them, unique answers score.
+  categories: {
+    name: 'Categories', rounds: 3, maxRounds: 8, wordsPerRound: 1, overtime: false, input: 'categories',
+    perRound: 6, writeMs: 60_000, reviewMs: 40_000,
   },
   // A Draw & Guess round = every player draws once, so turns = players x rounds.
   draw: {
@@ -129,7 +138,7 @@ export function createRoom(code) {
     history: [], // finished words/turns this game, for the final screen
     records: [], // finished games in this room, newest first
     phaseEndsAt: 0,
-    decks: { quiz: makeDeck(POOL), draw: makeDeck(DRAW_POOL), imposter: makeDeck(IMPOSTER_POOL) },
+    decks: { quiz: makeDeck(POOL), draw: makeDeck(DRAW_POOL), imposter: makeDeck(IMPOSTER_POOL), categories: makeDeck(CATEGORY_POOL) },
     imposterOrder: [], // Odd One Out: who is the imposter in which round
     timer: null,
   };
@@ -178,6 +187,13 @@ export function startGame(room, now = Date.now()) {
     room.questions = drawFrom(room.decks.draw, room.turns.length);
   } else if (isRelay(room)) {
     room.questions = drawFrom(room.decks.draw, room.rounds.relay);
+  } else if (room.mode === 'categories') {
+    // A different letter every round, and 6 categories per round that don't repeat within the game.
+    const letters = shuffle(LETTERS);
+    room.questions = Array.from({ length: room.rounds.categories }, (_, i) => ({
+      letter: letters[i % letters.length],
+      categories: drawFrom(room.decks.categories, MODES.categories.perRound).map(c => c.answer),
+    }));
   } else if (room.mode === 'imposter') {
     room.questions = drawFrom(room.decks.imposter, room.rounds.imposter);
     room.imposterOrder = shuffle(room.players.map(p => p.id)); // everyone gets a turn as imposter before anyone repeats
@@ -194,10 +210,10 @@ export function startGame(room, now = Date.now()) {
 // Start the next word / drawing turn. Returns false when the game is over.
 // Draw & Guess skips turns whose drawer has left or is currently disconnected.
 export function advance(room, now = Date.now()) {
-  if (isRelay(room) || room.mode === 'imposter') {
+  if (isRelay(room) || room.mode === 'imposter' || room.mode === 'categories') {
     if (room.wordNo >= room.questions.length || !connectedIds(room).length) return false;
     const q = room.questions[room.wordNo++];
-    (isRelay(room) ? startRelay : startImposter)(room, q, now);
+    ({ relay: startRelay, imposter: startImposter, categories: startCategories })[room.mode](room, q, now);
     return true;
   }
   if (!isDraw(room)) {
@@ -224,9 +240,10 @@ export function nextWord(room, now = Date.now()) {
     pattern,
     missing: pattern ? pattern.map((c, i) => (c === '_' ? q.answer[i] : '')).join('') : null,
     difficulty: mode.hide ? difficulty(ratio) : null,
-    winnerId: null,
+    solved: [], // { id, name, points } in the order correct answers arrived
     locked: false,
-    overtime: false,
+    overtime: false, // Picture/Letters: time ran out with nobody right; the word waits
+    lastCall: false, // ...and then someone got it: the others have LAST_CALL_MS left
     hintVotes: new Set(),
     hintShown: false,
   };
@@ -435,6 +452,130 @@ function finishImposter(room, now, outcome) {
   room.phaseEndsAt = now + ROUND_END_MS;
 }
 
+// ---------- Categories (Scattergories-style) ----------
+
+export const CAT_UNIQUE = 100; // a valid answer nobody else gave
+const CAT_RESULT_MS = 9_000; // the result card has a lot to read
+
+function startCategories(room, q, now) {
+  room.current = {
+    q, // { letter, categories }
+    step: 'write', // write -> review -> locked
+    stepMs: MODES.categories.writeMs,
+    answers: new Map(), // playerId -> string[] (latest draft; hidden until review)
+    done: new Set(),
+    vetoes: new Map(), // "playerId:index" -> Set(voterIds)
+    ready: new Set(),
+    results: null,
+    locked: false,
+  };
+  room.phase = 'round';
+  room.phaseEndsAt = now + MODES.categories.writeMs;
+}
+
+// "The Shining", "a Snake" -> checked as "shining", "snake"; plurals match singulars when comparing players.
+const catWord = text => String(text ?? '').trim().replace(/^(the|a|an)\s+/i, '');
+const catKey = text => normalize(catWord(text));
+// Two answers are "the same" if they match exactly or one is a plural of the other (snake/snakes, cherry/cherries).
+const sameAnswer = (x, y) => x === y || plurals(x).includes(y) || plurals(y).includes(x);
+
+// Why an answer can't count before anyone votes on it (null = fine so far).
+export function catProblem(text, letter) {
+  const w = normalize(catWord(text));
+  if (!w) return 'empty';
+  if (w.length < 2) return 'too short';
+  if (w[0] !== letter.toLowerCase()) return `doesn't start with ${letter}`;
+  return null;
+}
+
+// Drafts are saved as players type, so whatever is there at the deadline counts. `done` locks your sheet.
+export function submitCategoryAnswers(room, playerId, { answers, done } = {}, now = Date.now()) {
+  const c = room.current;
+  if (room.mode !== 'categories' || room.phase !== 'round' || c.locked || c.step !== 'write')
+    return { ok: false, error: 'Answers are closed.' };
+  if (!playerById(room, playerId)) return { ok: false, error: 'You are not in this game.' };
+  if (c.done.has(playerId)) return { ok: false, error: 'You already handed in your answers.' };
+  if (!Array.isArray(answers)) return { ok: false, error: 'Bad answers.' };
+  c.answers.set(playerId, c.q.categories.map((_, i) => String(answers[i] ?? '').trim().slice(0, 30)));
+  if (done) c.done.add(playerId);
+  if (done && everyone(room, id => c.done.has(id))) { startReview(room, now); return { ok: true, ended: false }; }
+  return { ok: true, ended: false };
+}
+
+function startReview(room, now) {
+  const c = room.current;
+  c.step = 'review';
+  c.stepMs = MODES.categories.reviewMs;
+  room.phaseEndsAt = now + c.stepMs;
+}
+
+// Review: 👎 someone else's answer (again to take it back).
+export function vetoCategoryAnswer(room, voterId, { playerId, index } = {}) {
+  const c = room.current;
+  if (room.mode !== 'categories' || room.phase !== 'round' || c.locked || c.step !== 'review')
+    return { ok: false, error: 'Voting is closed.' };
+  if (!playerById(room, voterId) || voterId === playerId) return { ok: false, error: "You can't vote on your own answer." };
+  const text = c.answers.get(playerId)?.[index];
+  if (text === undefined || catProblem(text, c.q.letter)) return { ok: false, error: 'Nothing to vote on there.' };
+  const key = `${playerId}:${index}`;
+  const set = c.vetoes.get(key) ?? new Set();
+  set.has(voterId) ? set.delete(voterId) : set.add(voterId);
+  c.vetoes.set(key, set);
+  return { ok: true, ended: false };
+}
+
+export function readyCategories(room, playerId, now = Date.now()) {
+  const c = room.current;
+  if (room.mode !== 'categories' || room.phase !== 'round' || c.locked || c.step !== 'review')
+    return { ok: false, error: 'Nothing to confirm right now.' };
+  if (!playerById(room, playerId)) return { ok: false, error: 'You are not in this game.' };
+  c.ready.add(playerId);
+  if (everyone(room, id => c.ready.has(id))) { scoreCategories(room, now); return { ok: true, ended: true }; }
+  return { ok: true, ended: false };
+}
+
+// A vetoed answer is out when at least half of the other connected players 👎 it.
+function vetoedOut(room, playerId, index) {
+  const others = room.players.filter(p => p.connected && p.id !== playerId).length;
+  const votes = room.current.vetoes.get(`${playerId}:${index}`)?.size ?? 0;
+  return others > 0 && votes >= Math.ceil(others / 2);
+}
+
+function scoreCategories(room, now) {
+  const c = room.current;
+  const { letter, categories } = c.q;
+  const results = {}; // playerId -> [{ text, status: unique|shared|invalid|empty, reason, points }]
+  categories.forEach((_, i) => {
+    const entries = room.players.map(p => {
+      const text = c.answers.get(p.id)?.[i] ?? '';
+      const problem = catProblem(text, letter);
+      const status = problem === 'empty' ? 'empty' : problem ? 'invalid' : vetoedOut(room, p.id, i) ? 'invalid' : 'ok';
+      return { p, text, status, reason: problem && problem !== 'empty' ? problem : status === 'invalid' ? 'voted out' : null };
+    });
+    const valid = entries.filter(e => e.status === 'ok');
+    for (const e of valid) e.shared = valid.some(o => o !== e && sameAnswer(catKey(o.text), catKey(e.text)));
+    for (const e of entries) {
+      if (e.status === 'ok') e.status = e.shared ? 'shared' : 'unique';
+      const points = e.status === 'unique' ? CAT_UNIQUE : 0;
+      e.p.score += points;
+      (results[e.p.id] ??= []).push({ text: e.text, status: e.status, reason: e.reason, points });
+    }
+  });
+  c.results = results;
+  c.locked = true;
+  room.history.push({
+    emoji: '🔠',
+    answer: letter,
+    letter,
+    players: room.players.map(p => ({ name: p.name, points: (results[p.id] ?? []).reduce((n, r) => n + r.points, 0) })),
+  });
+  room.phase = 'result';
+  room.phaseEndsAt = now + CAT_RESULT_MS;
+}
+
+export const categorySync = (room, playerId) =>
+  room.mode === 'categories' && room.current ? { answers: room.current.answers.get(playerId) ?? null, done: room.current.done.has(playerId) } : {};
+
 // ---------- shared: someone dropped or left mid-round ----------
 
 // Returns true if this ended the round. Callers re-arm the timer either way (a step may have moved on).
@@ -442,6 +583,16 @@ export function playerGone(room, playerId, now = Date.now()) {
   const c = room.current;
   if (room.phase !== 'round' || !c || c.locked) return false;
   const stillHere = !!playerById(room, playerId);
+  if (c.solved?.length) {
+    // Quiz modes: end the word if everyone still here has now solved it
+    if (everyone(room, id => c.solved.some(s => s.id === id))) { endWord(room, now); return true; }
+    return false;
+  }
+  if (room.mode === 'categories') {
+    if (c.step === 'write' && everyone(room, id => c.done.has(id))) { startReview(room, now); return false; }
+    if (c.step === 'review' && everyone(room, id => c.ready.has(id))) { scoreCategories(room, now); return true; }
+    return false;
+  }
   if (isDraw(room)) return drawerGone(room, playerId, now) || checkAllGuessed(room, now);
   if (isRelay(room)) {
     if (c.step === 'draw' && c.drawerId === playerId) { nextLeg(room, now); return c.locked; }
@@ -462,15 +613,27 @@ export function playerGone(room, playerId, now = Date.now()) {
   return false;
 }
 
-function endWord(room, winner, now) {
+function endWord(room, now) {
   const c = room.current;
   c.locked = true;
-  c.winnerId = winner?.id ?? null;
-  if (winner) winner.score++;
-  room.history.push({ emoji: c.q.emoji, answer: c.q.answer, winnerId: c.winnerId, winnerName: winner?.name ?? null });
+  room.history.push({
+    emoji: c.q.emoji,
+    answer: c.q.answer,
+    solvers: c.solved.map(({ id, name, points }) => ({ id, name, points })),
+  });
   room.phase = 'result';
   room.phaseEndsAt = now + (isRoundEnd(room) ? ROUND_END_MS : RESULT_MS);
 }
+
+// Correct answer number n (0-based) gets pointsFor(n).
+function award(room, player) {
+  const c = room.current;
+  const points = pointsFor(c.solved.length);
+  player.score += points;
+  c.solved.push({ id: player.id, name: player.name, points });
+  return points;
+}
+const everyone = (room, has) => room.players.filter(p => p.connected).every(p => has(p.id));
 
 function endTurn(room, now) {
   const c = room.current;
@@ -492,20 +655,28 @@ function endTurn(room, now) {
   room.phaseEndsAt = now + ROUND_END_MS;
 }
 
-// Quiz modes. Node handles socket events one at a time, so the first correct submission to reach here locks the word
-// and any later one (even milliseconds later) sees locked = true.
-// `guesses` may be one string or several (voice input sends the recogniser's alternatives).
+// Picture / Letters / Classic. Node handles socket events one at a time, so correct answers are ranked in the exact
+// order they reach the server: 100, 75, 50... Each player scores once per word. The word ends when everyone has it
+// (or at the deadline, see wordTimeUp). `guesses` may be one string or several (voice input sends alternatives).
 export function submitAnswer(room, playerId, guesses, now = Date.now()) {
   const c = room.current;
-  if (!modeOf(room).hide && !modeOf(room).hintVote) return { correct: false, reason: 'closed' }; // quiz modes only
+  if (!['text', 'boxes'].includes(modeOf(room).input)) return { correct: false, reason: 'closed' };
   if (room.phase !== 'round' || !c || c.locked) return { correct: false, reason: 'closed' };
   const player = room.players.find(p => p.id === playerId);
   if (!player) return { correct: false, reason: 'closed' };
+  if (c.solved.some(s => s.id === playerId)) return { correct: false, reason: 'done' };
   const list = (Array.isArray(guesses) ? guesses : [guesses]).slice(0, 5);
   if (!list.some(g => isCorrect(g, c))) return { correct: false };
-  endWord(room, player, now);
-  return { correct: true };
+  const points = award(room, player);
+  const word = c.q.answer;
+  if (everyone(room, id => c.solved.some(s => s.id === id))) {
+    endWord(room, now);
+    return { correct: true, points, word, ended: true };
+  }
+  if (c.overtime && !c.lastCall) { c.lastCall = true; room.phaseEndsAt = now + LAST_CALL_MS; }
+  return { correct: true, points, word, ended: false };
 }
+
 
 // Draw & Guess / Relay. Everyone who doesn't know the word can guess until they get it; points shrink with each
 // correct guesser. Relay only takes guesses once every leg is drawn.
@@ -523,8 +694,7 @@ export function submitDrawGuess(room, playerId, text, now = Date.now()) {
     if (c.guesses.length > 50) c.guesses.shift();
     return { correct: false };
   }
-  const n = c.guessed.length;
-  const points = GUESS_POINTS[n] ?? Math.max(10, Math.round(GUESS_POINTS.at(-1) / 2 ** (n - GUESS_POINTS.length + 1)));
+  const points = pointsFor(c.guessed.length);
   player.score += points;
   c.guessed.push({ id: player.id, name: player.name, points });
   c.guesses.push({ name: player.name, text: null, correct: true });
@@ -560,6 +730,11 @@ export function wordTimeUp(room, now = Date.now()) {
     endTurn(room, now);
     return true;
   }
+  if (room.mode === 'categories') {
+    if (c.step === 'write') { startReview(room, now); return false; }
+    scoreCategories(room, now);
+    return true;
+  }
   if (room.mode === 'imposter') {
     if (c.step === 'clue') {
       c.clues.push({ id: clueGiver(c), name: nameOf(room, clueGiver(c)), text: null }); // ran out of time: no clue
@@ -570,15 +745,17 @@ export function wordTimeUp(room, now = Date.now()) {
     finishImposter(room, now); // guess step: no answer in time
     return true;
   }
-  if (modeOf(room).overtime) { room.current.overtime = true; return false; }
-  endWord(room, null, now);
-  return true;
+  // Quiz modes: if anyone has it, the word is done. If nobody does, Picture/Letters pause (overtime) and Classic /
+  // Character Quiz move on.
+  if (c.solved.length || !modeOf(room).overtime) { endWord(room, now); return true; }
+  c.overtime = true;
+  return false;
 }
 
 // Only once the time is up, so a word can't be skipped before anyone had a real go.
 export function skipWord(room, now = Date.now()) {
   if (!modeOf(room).overtime || room.phase !== 'round' || !room.current.overtime) return false;
-  endWord(room, null, now);
+  endWord(room, now);
   return true;
 }
 
@@ -638,21 +815,20 @@ export function finishGame(room, now = Date.now()) {
   room.records.length = Math.min(room.records.length, RECORDS_KEPT);
 }
 
-// Room leaderboard, by player name so it survives leaving and rejoining.
-// words = words won in the quiz modes; drawBest = best Draw & Guess score (points, so kept apart).
+// Room leaderboard, by player name so it survives leaving and rejoining. Every mode now scores in points.
 export function leaderboard(records) {
   const by = new Map();
   for (const r of records) {
     for (const p of r.players) {
-      const e = by.get(p.name) ?? { name: p.name, games: 0, wins: 0, words: 0, best: 0, drawBest: 0 };
+      const e = by.get(p.name) ?? { name: p.name, games: 0, wins: 0, points: 0, best: 0 };
       e.games++;
-      if (r.mode === 'draw' || r.mode === 'relay') e.drawBest = Math.max(e.drawBest, p.score);
-      else if (r.mode !== 'imposter') { e.words += p.score; e.best = Math.max(e.best, p.score); } // imposter: wins only
+      e.points += p.score;
+      e.best = Math.max(e.best, p.score);
       if (r.winners.includes(p.name)) e.wins++;
       by.set(p.name, e);
     }
   }
-  return [...by.values()].sort((a, b) => b.wins - a.wins || b.words - a.words || b.drawBest - a.drawBest);
+  return [...by.values()].sort((a, b) => b.wins - a.wins || b.points - a.points || b.best - a.best);
 }
 
 export function toLobby(room) {
@@ -669,6 +845,22 @@ function publicCurrent(room) {
   const c = room.current;
   if (!c) return null;
   const counted = c.locked || (c.step && c.step !== 'clue' && c.step !== 'vote');
+  if (room.mode === 'categories') {
+    const shown = c.step === 'review' || c.locked; // nobody sees anyone's sheet while writing
+    const sheets = shown ? Object.fromEntries(room.players.map(p => [p.id, c.answers.get(p.id) ?? c.q.categories.map(() => '')])) : null;
+    return {
+      step: c.locked ? 'reveal' : c.step,
+      stepMs: c.stepMs,
+      letter: c.q.letter,
+      categories: c.q.categories,
+      done: [...c.done],
+      ready: [...c.ready],
+      answers: sheets,
+      problems: shown ? Object.fromEntries(Object.entries(sheets).map(([id, list]) => [id, list.map(t => catProblem(t, c.q.letter))])) : null,
+      vetoes: shown ? [...c.vetoes].map(([key, set]) => { const [playerId, index] = key.split(':'); return { playerId, index: +index, by: [...set] }; }) : null,
+      results: c.results,
+    };
+  }
   if (room.mode === 'imposter') {
     return {
       step: c.locked ? 'reveal' : c.step,
@@ -733,7 +925,8 @@ function publicCurrent(room) {
     difficulty: c.difficulty,
     displayPattern: c.pattern?.join(' ') ?? null,
     overtime: c.overtime,
-    winnerId: c.winnerId,
+    lastCall: c.lastCall,
+    solved: c.solved, // who got it, in order, with points (not what they typed)
     answer: c.locked ? c.q.answer : null, // never sent while the word is open
   };
 }

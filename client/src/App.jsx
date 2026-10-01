@@ -18,8 +18,10 @@ const MODE_CARDS = [
   { key: 'draw', icon: '🎨', name: 'Draw & Guess', desc: 'Take turns drawing a secret word while the others guess.' },
   { key: 'relay', icon: '🏃', name: 'Relay Draw', desc: 'Only the first artist knows the word; everyone adds a 15 s leg, then all guess.' },
   { key: 'imposter', icon: '🕵️', name: 'Odd One Out', desc: 'One player has a different word. Give clues, vote out the imposter. 3+ players.' },
+  { key: 'categories', icon: '🔠', name: 'Categories', desc: 'A letter + 6 categories: write something for each. Only unique answers score!' },
 ];
-const POINTS_MODES = ['draw', 'relay', 'imposter'];
+const QUIZ_MODES = ['picture', 'letters', 'classic'];
+const MEDALS = ['🥇', '🥈', '🥉'];
 const MODE_ICON = Object.fromEntries(MODE_CARDS.map(m => [m.key, m.icon]));
 const Recognition = window.SpeechRecognition || window.webkitSpeechRecognition;
 
@@ -94,6 +96,7 @@ export default function App() {
   else if (game.phase === 'final') screen = <Final game={game} me={me} actions={actions} />;
   else if (game.mode === 'draw' || game.mode === 'relay') screen = <DrawGame key={game.round} game={game} me={me} />;
   else if (game.mode === 'imposter') screen = <ImposterGame key={game.round} game={game} me={me} />;
+  else if (game.mode === 'categories') screen = <CategoriesGame key={game.round} game={game} me={me} />;
   else screen = <Game game={game} me={me} activity={activity} actions={actions} />;
 
   return (
@@ -171,6 +174,7 @@ function RoundsInput({ game, isHost, actions }) {
     ? `each player draws ${n === 1 ? 'once' : `${n} times`} → ${n * game.players.length} turns`
     : game.mode === 'relay' ? `${n} ${n === 1 ? 'drawing' : 'drawings'}, each passed through every player`
     : game.mode === 'imposter' ? `${n} ${n === 1 ? 'round' : 'rounds'}, a new word pair and imposter each time`
+    : game.mode === 'categories' ? `${n} ${n === 1 ? 'letter' : 'letters'} × 6 categories`
     : per > 1 ? `${n} × ${per} words = ${n * per} words` : `${n} ${n === 1 ? 'word' : 'words'}`;
   return (
     <div className="rounds">
@@ -242,7 +246,7 @@ function Scores({ game, me }) {
   return (
     <div className="scores">
       {game.players.map(p => (
-        <div key={p.id} className={`score ${p.id === me ? 'me' : ''} ${game.phase === 'result' && c?.winnerId === p.id ? 'winner' : ''}`}>
+        <div key={p.id} className={`score ${p.id === me ? 'me' : ''} ${c?.solved?.some(x => x.id === p.id) ? 'winner' : ''}`}>
           <span className={`dot ${p.connected ? 'on' : ''}`} />
           <span className="name">{game.mode === 'draw' && c?.drawerId === p.id && '🎨 '}{p.name}{p.id === me && ' (you)'}</span>
           <b key={p.score} className="pop">{p.score}</b>
@@ -388,32 +392,44 @@ function HintVote({ c, me, open }) {
 }
 
 // Picture, Letters and Classic modes.
+// Picture, Letters and Classic. Correct answers score in the order they arrive (100, 75, 50…); once you have it,
+// your input locks and you watch the others. The word ends when everyone has it or the time runs out.
 function Game({ game, me, activity, actions }) {
   const now = useNow();
   const [wrong, setWrong] = useState(0);
+  const [mine, setMine] = useState(null); // { word, points } once I've solved it (only I know the word then)
   const lastTyping = useRef(0);
   const c = game.current;
   const info = game.modeInfo;
   const open = game.phase === 'round';
   const isHost = game.hostId === me;
   const secs = Math.max(0, Math.ceil((game.endsAt - now) / 1000));
-  const pct = open && !c.overtime ? Math.max(0, (game.endsAt - now) / info.wordMs) * 100 : 0;
+  const waiting = c.overtime && !c.lastCall; // paused: nobody has it yet
+  const pct = open && !waiting ? Math.max(0, (game.endsAt - now) / (c.lastCall ? 5000 : info.wordMs)) * 100 : 0;
   const wordKey = `${game.round}-${game.word}`;
   const multi = info.wordsPerRound > 1;
   const roundEnd = game.word === info.wordsPerRound;
+  const canAnswer = open && !mine;
+  const shownAnswer = c.answer ?? mine?.word ?? null;
 
-  useEffect(() => setWrong(0), [wordKey]);
+  useEffect(() => { setWrong(0); setMine(null); }, [wordKey]);
 
-  const submit = guess => socket.emit('answer', guess, res => { if (!res.correct && !res.reason) setWrong(Date.now()); });
+  const submit = guess => socket.emit('answer', guess, res => {
+    if (res.correct) setMine({ word: res.word, points: res.points });
+    else if (!res.reason) setWrong(Date.now());
+  });
   const onType = () => {
     if (Date.now() - lastTyping.current > 800) { lastTyping.current = Date.now(); socket.emit('typing'); }
   };
 
-  const recent = activity && now - activity.at < 1500 && open;
-  const winner = game.players.find(p => p.id === c.winnerId);
+  const recent = activity && now - activity.at < 2000 && open;
+  const first = c.solved[0];
   const next = !roundEnd ? `Next word in ${secs}…`
     : game.round < info.rounds ? `Round ${game.round + 1}${game.mode === 'letters' ? ' (harder!)' : ''} starts in ${secs}…`
     : `Final results in ${secs}…`;
+  const activityText = !recent ? null
+    : activity.type === 'solved' ? `⚡ ${activity.name} got it! (+${activity.points})`
+    : activity.type === 'wrong' ? `❌ ${activity.name} guessed wrong` : `✍️ ${activity.name} is typing…`;
 
   return (
     <div className="game">
@@ -426,8 +442,8 @@ function Game({ game, me, activity, actions }) {
             {c.difficulty && game.mode === 'letters' && <> · <span className={`diff ${c.difficulty.toLowerCase()}`}>{c.difficulty}</span></>}
           </small>
         </div>
-        <div className={`timer ${open && !c.overtime && secs <= 5 ? 'urgent' : ''}`}>
-          {!open ? '–' : c.overtime ? '⏸' : <>{secs}<small>s</small></>}
+        <div className={`timer ${open && !waiting && secs <= 5 ? 'urgent' : ''}`}>
+          {!open ? '–' : waiting ? '⏸' : <>{secs}<small>s</small></>}
         </div>
         <Scores game={game} me={me} />
       </header>
@@ -443,22 +459,28 @@ function Game({ game, me, activity, actions }) {
 
         <div className={now - wrong < 450 ? 'shake' : ''}>
           {info.input === 'boxes'
-            ? <LetterBoxes pattern={c.pattern} answer={c.answer} open={open} wordKey={wordKey} wrongAt={wrong} onType={onType} onSubmit={submit} />
-            : c.pattern && <WordTiles pattern={c.pattern} answer={c.answer} />}
+            ? <LetterBoxes pattern={c.pattern} answer={shownAnswer} open={canAnswer} wordKey={wordKey} wrongAt={wrong} onType={onType} onSubmit={submit} />
+            : c.pattern && <WordTiles pattern={c.pattern} answer={shownAnswer} />}
         </div>
-        {info.input === 'text' && (
-          <AnswerBox open={open} wordKey={wordKey} wrongAt={wrong} onType={onType} onSubmit={submit}
+        {info.input === 'text' && !mine && (
+          <AnswerBox open={canAnswer} wordKey={wordKey} wrongAt={wrong} onType={onType} onSubmit={submit}
             voice={game.mode === 'picture'}
             placeholder={game.mode === 'classic' ? 'Type the word (or just the missing letters)' : 'Type what it is…'} />
         )}
-        {c.hintVote && <HintVote c={c} me={me} open={open} />}
+        {mine && open && (
+          <div className="secret got-it">🎉 You got it: <b>{mine.word}</b> (+{mine.points}). Waiting for the others…</div>
+        )}
+        {c.hintVote && !mine && <HintVote c={c} me={me} open={open} />}
 
+        {c.solved.length > 0 && (
+          <div className="solved-strip">
+            {c.solved.map((x, i) => <span key={x.id}>{MEDALS[i] ?? '✅'} {x.name}{x.id === me && ' (you)'} <b>+{x.points}</b></span>)}
+          </div>
+        )}
         <div className="activity">
-          {open && now - wrong < 2000 ? <span className="bad-text">Not quite, try again!</span>
-            : recent ? <span>{activity.type === 'wrong' ? `❌ ${activity.name} guessed wrong` : `✍️ ${activity.name} is typing…`}</span>
-            : null}
+          {open && now - wrong < 2000 ? <span className="bad-text">Not quite, try again!</span> : activityText && <span>{activityText}</span>}
         </div>
-        {open && c.overtime && (
+        {open && waiting && (
           <div className="overtime">
             <span>⏸ Time's up, but no rush. Keep guessing!</span>
             {isHost
@@ -466,16 +488,161 @@ function Game({ game, me, activity, actions }) {
               : <small>Only the host can skip this word.</small>}
           </div>
         )}
+        {open && c.lastCall && <div className="overtime"><span>⏳ Last call! {secs}s left to get it.</span></div>}
       </main>
 
       {game.phase === 'result' && (
         <div className="overlay">
           <div className="card result">
             {multi && roundEnd && <div className="chip">Round {game.round} complete!</div>}
-            <h2>{!winner ? (info.overtime ? '⏭ Word skipped' : "⏰ Time's up!") : winner.id === me ? '🎉 You got it!' : `⚡ ${winner.name} got it first!`}</h2>
+            <h2>{!first ? (info.overtime ? '⏭ Word skipped' : "⏰ Time's up!") : first.id === me ? '🎉 You got it first!' : `⚡ ${first.name} got it first!`}</h2>
             <p className="answer-reveal">{c.emoji} {c.answer}</p>
+            {c.solved.length > 0 && (
+              <ul className="turn-points">
+                {c.solved.map((x, i) => <li key={x.id}><span>{MEDALS[i] ?? '✅'} {x.name}</span><b>+{x.points}</b></li>)}
+              </ul>
+            )}
             <Scores game={game} me={me} />
             <p className="muted">{next}</p>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ---------------- Categories ----------------
+
+// Same rule as the server: ignore a leading "the/a/an", first letter must match.
+const startsWith = (text, letter) => {
+  const w = text.trim().replace(/^(the|a|an)\s+/i, '').toLowerCase().replace(/[^a-z0-9]/g, '');
+  return !w || w[0] === letter.toLowerCase();
+};
+const CAT_STATUS = { unique: '✅', shared: '👥', invalid: '❌', empty: '·' };
+
+function CategoriesGame({ game, me }) {
+  const now = useNow();
+  const c = game.current;
+  const open = game.phase === 'round';
+  const [answers, setAnswers] = useState(() => c.categories.map(() => ''));
+  const [done, setDone] = useState(false);
+  const [error, setError] = useState('');
+  const saveTimer = useRef(null);
+  const secs = Math.max(0, Math.ceil((game.endsAt - now) / 1000));
+  const pct = open ? Math.max(0, (game.endsAt - now) / c.stepMs) * 100 : 0;
+  const connected = game.players.filter(p => p.connected).length;
+  const nameOf = id => game.players.find(p => p.id === id)?.name ?? 'Someone';
+  const writing = open && c.step === 'write';
+
+  // Keyed by round: restore my sheet after a refresh.
+  useEffect(() => {
+    socket.emit('cat:sync', null, r => { if (r.answers) setAnswers(r.answers); if (r.done) setDone(true); });
+    return () => clearTimeout(saveTimer.current);
+  }, []);
+
+  const send = (event, value, then) => socket.emit(event, value, res => (res.ok ? (setError(''), then?.()) : setError(res.error)));
+  // Drafts are saved as you type, so whatever is in the boxes when time runs out still counts.
+  const change = (i, v) => {
+    const next = answers.map((a, k) => (k === i ? v : a));
+    setAnswers(next);
+    clearTimeout(saveTimer.current);
+    saveTimer.current = setTimeout(() => socket.emit('cat:answers', { answers: next }), 300);
+  };
+  const finish = () => { clearTimeout(saveTimer.current); send('cat:answers', { answers, done: true }, () => setDone(true)); };
+
+  const stepLabel = { write: '✍️ Write', review: '🔍 Review', reveal: '🏁 Scores' }[c.step];
+
+  return (
+    <div className="game categories-game">
+      <header className="topbar">
+        <div className="round">
+          Round <b>{game.round}</b> / {game.modeInfo.rounds}
+          <small>🔠 Categories · <span className="your-turn">{stepLabel}</span></small>
+        </div>
+        <div className={`timer ${open && secs <= 10 ? 'urgent' : ''}`}>{open ? clock(secs) : '–'}</div>
+        <Scores game={game} me={me} />
+      </header>
+      <div className="timebar"><div style={{ width: `${pct}%` }} /></div>
+
+      <main className="cat-stage">
+        <div className="letter-badge" aria-label={`Letter ${c.letter}`}>{c.letter}</div>
+        {c.step === 'write' && (
+          <>
+            <p className="muted center">Everything must start with <b>{c.letter}</b>. Only answers nobody else gives will score!</p>
+            <div className="cat-sheet">
+              {c.categories.map((cat, i) => (
+                <label key={cat} className="cat-row">
+                  <span>{cat}</span>
+                  <input value={answers[i]} maxLength={30} disabled={!writing || done} placeholder={`${c.letter}…`}
+                    className={startsWith(answers[i], c.letter) ? '' : 'bad'} onChange={e => change(i, e.target.value)}
+                    autoComplete="off" spellCheck={false} />
+                </label>
+              ))}
+            </div>
+            <button className="btn primary" disabled={!writing || done} onClick={finish}>
+              {done ? `Done ✔ Waiting for the others (${c.done.length}/${connected})` : 'Done ✔'}
+            </button>
+          </>
+        )}
+
+        {c.step === 'review' && (
+          <>
+            <p className="muted center">Check everyone's answers. 👎 anything that doesn't fit the category.
+              Half of the other players 👎 = it doesn't count.</p>
+            {c.categories.map((cat, i) => (
+              <section key={cat} className="cat-review">
+                <h4>{cat}</h4>
+                <ul>
+                  {game.players.map(p => {
+                    const text = c.answers[p.id]?.[i] ?? '';
+                    const problem = c.problems[p.id]?.[i];
+                    const by = c.vetoes.find(v => v.playerId === p.id && v.index === i)?.by ?? [];
+                    return (
+                      <li key={p.id} className={problem ? 'bad' : ''}>
+                        <span className="who">{p.name}{p.id === me && ' (you)'}</span>
+                        <span className="ans">{text || '—'}</span>
+                        {problem && problem !== 'empty' && <small>{problem}</small>}
+                        {!problem && (p.id === me
+                          ? by.length > 0 && <small>👎 {by.length}</small>
+                          : <button className={`veto ${by.includes(me) ? 'on' : ''}`} disabled={!open}
+                              onClick={() => send('cat:veto', { playerId: p.id, index: i })}>👎 {by.length || ''}</button>)}
+                      </li>
+                    );
+                  })}
+                </ul>
+              </section>
+            ))}
+            <button className="btn primary" disabled={!open || c.ready.includes(me)} onClick={() => send('cat:ready', null)}>
+              {c.ready.includes(me) ? `Waiting for the others (${c.ready.length}/${connected})` : '✔ Looks good'}
+            </button>
+          </>
+        )}
+        {error && <p className="bad-text">{error}</p>}
+      </main>
+
+      {game.phase === 'result' && c.results && (
+        <div className="overlay">
+          <div className="card result cat-result">
+            <h2>🔠 Letter {c.letter}</h2>
+            {c.categories.map((cat, i) => (
+              <section key={cat} className="cat-review">
+                <h4>{cat}</h4>
+                <ul>
+                  {game.players.map(p => {
+                    const r = c.results[p.id]?.[i];
+                    return r && (
+                      <li key={p.id} className={r.status}>
+                        <span className="who">{p.name}</span>
+                        <span className="ans">{CAT_STATUS[r.status]} {r.text || '—'}</span>
+                        <small>{r.status === 'unique' ? `+${r.points}` : r.status === 'shared' ? 'same as someone' : r.reason ?? ''}</small>
+                      </li>
+                    );
+                  })}
+                </ul>
+              </section>
+            ))}
+            <Scores game={game} me={me} />
+            <p className="muted">{game.round < game.modeInfo.rounds ? `Next letter in ${secs}…` : `Final results in ${secs}…`}</p>
           </div>
         </div>
       )}
@@ -866,29 +1033,29 @@ const OUTCOME_SHORT = {
 };
 
 function Final({ game, me, actions }) {
-  const points = POINTS_MODES.includes(game.mode);
+  const quiz = QUIZ_MODES.includes(game.mode);
   const ranked = [...game.players].sort((a, b) => b.score - a.score);
   const top = ranked.filter(p => p.score === ranked[0].score);
   const tie = top.length > 1;
-  const medal = p => ['🥇', '🥈', '🥉'][ranked.filter(o => o.score > p.score).length] ?? '·';
+  const medal = p => MEDALS[ranked.filter(o => o.score > p.score).length] ?? '·';
   const ready = game.players.length >= game.minPlayers && game.players.every(p => p.connected);
   const isHost = game.hostId === me;
-  const skipped = points ? [] : game.history.filter(h => !h.winnerId);
+  const skipped = quiz ? game.history.filter(h => !h.solvers.length) : [];
 
   return (
     <div className="card final wide">
-      {points && <div className="chip">{MODE_ICON[game.mode]} GAME OVER</div>}
+      <div className="chip">{MODE_ICON[game.mode]} GAME OVER</div>
       <div className="trophy">{tie ? '🤝' : '🏆'}</div>
       <h2>{tie ? "It's a tie!" : ranked[0].id === me ? 'You win!' : `${ranked[0].name} wins!`}</h2>
       {tie && <p className="muted center">{top.map(p => p.name).join(' & ')} share the top spot</p>}
       <ol className="podium">
         {ranked.map((p, i) => {
-          const words = points ? [] : game.history.filter(h => h.winnerId === p.id);
+          const words = quiz ? game.history.filter(h => h.solvers.some(s => s.id === p.id)) : [];
           return (
             <li key={p.id} className={!tie && i === 0 ? 'first' : ''}>
               <div className="podium-row">
                 <span>{medal(p)} {p.name}{p.id === me && ' (you)'}</span>
-                <b>{points ? `${p.score} pts` : `${words.length} ${words.length === 1 ? 'word' : 'words'}`}</b>
+                <b>{p.score} pts{quiz && <small className="muted"> · {words.length} {words.length === 1 ? 'word' : 'words'}</small>}</b>
               </div>
               {words.length > 0 && <WordList items={words} />}
             </li>
@@ -909,11 +1076,18 @@ function Final({ game, me, actions }) {
           ))}
         </ul>
       )}
+      {game.mode === 'categories' && (
+        <ul className="turn-summary">
+          {game.history.map((h, i) => (
+            <li key={i}>🔠 <b>{h.letter}</b>: {[...h.players].sort((a, b) => b.points - a.points).map(p => `${p.name} +${p.points}`).join(' · ')}</li>
+          ))}
+        </ul>
+      )}
       {skipped.length > 0 && (
         <div className="skipped"><small className="muted">Nobody got</small><WordList items={skipped} /></div>
       )}
       <button className="btn primary" disabled={!ready} onClick={actions.again}>{ready ? 'Play Again' : `Waiting for ${game.minPlayers}+ connected players…`}</button>
-      <p className="muted center">Play Again deals brand-new {game.mode === 'imposter' ? 'word pairs' : points ? 'words to draw' : 'words'}.</p>
+      <p className="muted center">Play Again deals {game.mode === 'categories' ? 'new letters and categories' : game.mode === 'imposter' ? 'new word pairs' : 'brand-new words'}.</p>
       {isHost && <button className="btn" onClick={actions.lobby}>Back to lobby (change mode)</button>}
       <Leaderboard game={game} me={me} />
       <button className="btn ghost" onClick={actions.leave}>Leave room</button>
@@ -929,11 +1103,11 @@ function Leaderboard({ game, me }) {
       <h3>🏆 Room leaderboard</h3>
       <div className="table-wrap">
         <table>
-          <thead><tr><th>#</th><th>Player</th><th>Wins</th><th>Games</th><th>Words</th><th>Best 🎨</th></tr></thead>
+          <thead><tr><th>#</th><th>Player</th><th>Wins</th><th>Games</th><th>Points</th><th>Best</th></tr></thead>
           <tbody>
             {game.leaderboard.map((e, i) => (
               <tr key={e.name} className={e.name === myName ? 'me' : ''}>
-                <td>{['🥇', '🥈', '🥉'][i] ?? i + 1}</td><td>{e.name}</td><td>{e.wins}</td><td>{e.games}</td><td>{e.words}</td><td>{e.drawBest || '–'}</td>
+                <td>{MEDALS[i] ?? i + 1}</td><td>{e.name}</td><td>{e.wins}</td><td>{e.games}</td><td>{e.points}</td><td>{e.best}</td>
               </tr>
             ))}
           </tbody>

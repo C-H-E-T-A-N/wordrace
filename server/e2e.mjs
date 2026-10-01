@@ -243,6 +243,66 @@ assert.equal(cur().answer, relayWord);
 console.log(`relay: "${relayWord}" drawn by ${cur().chain.map(p => p.name).join(' → ')}; guessed by both, starter +${cur().drawerPoints}`);
 for (const p of rel) p.s.disconnect();
 
+// ---- Classic with ordered points: both answer right, 100 then 75; the word stays open in between ----
+const q1 = client('Ria');
+const q2 = client('Sol');
+await until(() => q1.s.connected && q2.s.connected);
+const room5 = (await q1.emit('create', { name: 'Ria' })).code;
+await q2.emit('join', { code: room5, name: 'Sol' });
+assert.ok((await q1.emit('setMode', 'classic')).ok);
+assert.ok((await q1.emit('start')).ok);
+await until(() => q2.state?.phase === 'round');
+assert.ok(q1.state.current.pattern.includes('_'));
+// Test-only shortcut: Classic shows the hint, and hints are unique in the pool, so look the answer up.
+const { POOL } = await import('./questions.js');
+const classicWord = POOL.find(q => q.hint === q1.state.current.hint).answer;
+const a1 = await q2.emit('answer', classicWord.toLowerCase());
+assert.deepEqual([a1.correct, a1.points, a1.ended], [true, 100, false]);
+await until(() => q1.state.current.solved.length === 1);
+assert.equal(q1.state.phase, 'round', 'word ended after the first correct answer');
+assert.equal(q1.state.current.answer, null, 'answer revealed to someone who has not got it');
+const a2 = await q1.emit('answer', classicWord);
+assert.deepEqual([a2.points, a2.ended], [75, true]);
+console.log(`classic: "${classicWord}" -> Sol +100, Ria +75 (ordered points)`);
+q1.s.disconnect();
+q2.s.disconnect();
+
+// ---- Categories with 3 players: private sheets, auto-check, veto, unique vs shared ----
+const cat = ['Tia', 'Uma', 'Vic'].map(client);
+await until(() => cat.every(p => p.s.connected));
+const room6 = (await cat[0].emit('create', { name: 'Tia' })).code;
+for (const p of cat.slice(1)) await p.emit('join', { code: room6, name: p.name });
+assert.ok((await cat[0].emit('setMode', 'categories')).ok);
+assert.ok((await cat[0].emit('setRounds', 1)).ok);
+assert.ok((await cat[0].emit('start')).ok);
+await until(() => cat[0].state?.phase === 'round');
+const L = cat[0].state.current.letter;
+const n = cat[0].state.current.categories.length;
+const sheet = (...words) => Array.from({ length: n }, (_, i) => words[i] ?? '');
+// Tia + Uma share answer 0; Vic's answer 0 is unique; Uma's answer 1 has the wrong letter; Vic's answer 1 gets vetoed
+const tia = sheet(`${L}apple`, `${L}tia-one`);
+const uma = sheet(`${L}APPLE`, `Q${L}nope`);
+const vic = sheet(`${L}vic-zero`, `${L}vetoed`);
+assert.ok((await cat[0].emit('cat:answers', { answers: tia, done: true })).ok);
+assert.ok((await cat[1].emit('cat:answers', { answers: uma })).ok); // draft only
+assert.equal(cat[2].state.current.answers, null, 'sheets visible while writing');
+for (const p of cat) for (const x of p.publicPayloads) assert.ok(!x.includes(`${L}tia-one`), 'a draft leaked');
+assert.deepEqual((await cat[1].emit('cat:sync', null)).answers, uma);
+assert.ok((await cat[1].emit('cat:answers', { answers: uma, done: true })).ok);
+assert.ok((await cat[2].emit('cat:answers', { answers: vic, done: true })).ok);
+await until(() => cat[0].state.current.step === 'review');
+const idOfCat = p => p.state.players.find(x => x.name === p.name).id;
+assert.ok((await cat[0].emit('cat:veto', { playerId: idOfCat(cat[2]), index: 1 })).ok);
+for (const p of cat) assert.ok((await p.emit('cat:ready', null)).ok);
+await until(() => cat[0].state.phase === 'result');
+const res = cat[0].state.current.results;
+assert.deepEqual(res[idOfCat(cat[0])].slice(0, 2).map(r => r.status), ['shared', 'unique']);
+assert.deepEqual(res[idOfCat(cat[1])].slice(0, 2).map(r => r.status), ['shared', 'invalid']);
+assert.deepEqual(res[idOfCat(cat[2])].slice(0, 2).map(r => r.status), ['unique', 'invalid']);
+assert.deepEqual(cat[0].state.players.map(p => p.score), [100, 0, 100]);
+console.log(`categories: letter ${L}, shared answers scored 0, unique +100, wrong letter and vetoed answers rejected`);
+for (const p of cat) p.s.disconnect();
+
 for (const p of [...players, p1, p2]) p.s.disconnect();
 console.log('\nE2E OK');
 process.exit(0);

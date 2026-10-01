@@ -51,7 +51,7 @@ for (const q of POOL) for (const ratio of [0.35, 0.5, 0.65, 0.4]) {
   const room = G.createRoom('RNDS');
   const ps = ['A', 'B', 'C'].map(n => G.addPlayer(room, n));
   ps.forEach(p => (p.connected = true));
-  for (const [mode, n, words] of [['picture', 5, 15], ['letters', 1, 3], ['classic', 7, 7], ['draw', 2, 6]]) {
+  for (const [mode, n, words] of [['picture', 5, 15], ['letters', 1, 3], ['classic', 7, 7], ['draw', 2, 6], ['categories', 4, 4]]) {
     G.setMode(room, mode);
     assert.equal(G.setRounds(room, 0), false);
     assert.equal(G.setRounds(room, G.MODES[mode].maxRounds + 1), false);
@@ -116,49 +116,63 @@ function newGame(mode, names = ['A', 'B']) {
   G.voteHint(room, b.id);
   assert.equal(G.publicState(room).current.hint, room.current.q.hint);
 
-  // Race: B wrong, then A and B both right -> only A scores
+  // Points in answer order: B wrong (0), A right (100, word stays open for B), A again (no double score), B right (75)
+  const answer = room.current.q.answer;
   assert.deepEqual(G.submitAnswer(room, b.id, 'definitely wrong'), { correct: false });
-  assert.equal(G.submitAnswer(room, a.id, ['something else', 'the ' + room.current.q.answer.toLowerCase()]).correct, true);
-  assert.equal(G.submitAnswer(room, b.id, room.current.q.answer).correct, false);
-  assert.deepEqual([a.score, b.score], [1, 0]);
+  const ra = G.submitAnswer(room, a.id, ['something else', 'the ' + answer.toLowerCase()]);
+  assert.deepEqual([ra.correct, ra.points, ra.word, ra.ended], [true, 100, answer, false]);
+  assert.equal(room.phase, 'round', 'first correct answer must not end the word any more');
+  assert.equal(G.publicState(room).current.answer, null, 'answer revealed to the others after the first solve');
+  assert.deepEqual(G.publicState(room).current.solved.map(x => [x.name, x.points]), [['A', 100]]);
+  assert.equal(G.submitAnswer(room, a.id, answer).reason, 'done');
+  const rb = G.submitAnswer(room, b.id, answer);
+  assert.deepEqual([rb.points, rb.ended], [75, true], 'everyone solved -> word over');
+  assert.deepEqual([a.score, b.score], [100, 75]);
 
-  // Word 2: the hint also appears when the only player not asking disconnects
+  // Word 2: the hint also appears when the only player not asking disconnects; time up with a solver ends the word
   G.nextWord(room);
   G.voteHint(room, a.id);
   b.connected = false;
   G.checkHint(room);
   assert.ok(G.publicState(room).current.hint);
   b.connected = true;
-  assert.equal(G.submitAnswer(room, a.id, room.current.q.answer).correct, true);
+  assert.equal(G.submitAnswer(room, a.id, room.current.q.answer).ended, false);
+  assert.equal(G.wordTimeUp(room), true, 'someone has it -> time up ends the word');
 
-  // Word 3: time up -> paused, not ended; still winnable. Skip not allowed before time is up.
+  // Word 3: nobody by the deadline -> paused; a solve during the pause gives the others a 5 s last call
   G.nextWord(room);
   assert.equal(G.skipWord(room), false);
-  assert.equal(G.wordTimeUp(room), false);
+  assert.equal(G.wordTimeUp(room, 1000), false);
   assert.equal(room.phase, 'round');
-  assert.equal(G.submitAnswer(room, b.id, room.current.q.answer).correct, true);
+  assert.equal(G.publicState(room).current.overtime, true);
+  assert.equal(G.submitAnswer(room, b.id, room.current.q.answer, 5000).ended, false);
+  assert.equal(room.phaseEndsAt, 5000 + G.LAST_CALL_MS);
+  assert.equal(G.publicState(room).current.lastCall, true);
+  assert.equal(G.wordTimeUp(room), true, 'last call over -> word ends');
 
   // Word 4 (round 2): skipped in overtime -> nobody scores
   G.nextWord(room);
   assert.equal(G.publicState(room).round, 2);
   G.wordTimeUp(room);
   assert.equal(G.skipWord(room), true);
-  assert.deepEqual([a.score, b.score], [2, 1]);
-  assert.deepEqual(room.history.map(h => h.winnerName), ['A', 'A', 'B', null]);
+  assert.deepEqual([a.score, b.score], [200, 175]); // A: 100 + 100, B: 75 + 100
+  assert.deepEqual(room.history.map(h => h.solvers.map(x => x.name).join()), ['A,B', 'A', 'B', '']);
 }
 
 // Letters mode: pattern but no picture until the word is over; hints can't be requested
 {
-  const { room, ps: [a] } = newGame('letters');
+  const { room, ps: [a, b] } = newGame('letters');
   const s = G.publicState(room).current;
   assert.ok(s.pattern.includes('_'));
   assert.equal(s.emoji, null, 'picture shown in Letters mode');
   assert.equal(G.voteHint(room, a.id), false);
-  assert.equal(G.submitAnswer(room, a.id, room.current.missing).correct, true);
+  assert.equal(G.submitAnswer(room, a.id, room.current.missing).points, 100);
+  assert.equal(G.publicState(room).current.emoji, null, 'picture shown while B is still guessing');
+  assert.equal(G.submitAnswer(room, b.id, room.current.q.answer).points, 75);
   assert.ok(G.publicState(room).current.emoji, 'picture revealed after the word');
 }
 
-// Classic mode: 4 rounds of 1 word, hint + category shown, time-up ends the word with no point
+// Classic mode: 4 rounds of 1 word, hint + category shown, time-up with nobody right ends the word with no points
 {
   const { room, ps: [a] } = newGame('classic');
   assert.equal(room.questions.length, 4);
@@ -167,16 +181,92 @@ function newGame(mode, names = ['A', 'B']) {
   assert.equal(G.wordTimeUp(room), true);
   assert.equal(room.phase, 'result');
   assert.equal(G.submitAnswer(room, a.id, room.current.q.answer).correct, false);
+  assert.equal(a.score, 0);
   G.nextWord(room);
   assert.equal(G.publicState(room).round, 2);
 }
 
-// 3 players all answer correctly: exactly one point is handed out
+// 4 players answer correctly in a row: 100, 75, 50, 25 (the server's arrival order decides)
 {
-  const { room, ps } = newGame('picture', ['A', 'B', 'C']);
-  const results = ps.map(p => G.submitAnswer(room, p.id, room.current.q.answer).correct);
-  assert.deepEqual(results, [true, false, false]);
-  assert.deepEqual(ps.map(p => p.score), [1, 0, 0]);
+  const { room, ps } = newGame('classic', ['A', 'B', 'C', 'D']);
+  const answer = room.current.q.answer;
+  const pts = [ps[2], ps[0], ps[3], ps[1]].map(p => G.submitAnswer(room, p.id, answer).points);
+  assert.deepEqual(pts, [100, 75, 50, 25]);
+  assert.deepEqual(ps.map(p => p.score), [75, 25, 100, 50]);
+  assert.equal(room.phase, 'result');
+  assert.deepEqual([4, 5, 6, 9].map(G.pointsFor), [13, 10, 10, 10]);
+}
+
+// A quiz player who leaves can't hold the word open: if everyone left has it, it ends
+{
+  const { room, ps: [a, b, c] } = newGame('picture', ['A', 'B', 'C']);
+  G.submitAnswer(room, a.id, room.current.q.answer);
+  G.submitAnswer(room, b.id, room.current.q.answer);
+  room.players = room.players.filter(p => p !== c);
+  assert.equal(G.playerGone(room, c.id), true);
+  assert.equal(room.phase, 'result');
+}
+
+// Categories: letter + categories, private drafts, auto checks, vetoes, unique vs shared scoring
+{
+  const { CATEGORY_POOL, LETTERS } = await import('./categories.js');
+  assert.ok(CATEGORY_POOL.length >= 24 && !LETTERS.includes('Q') && !LETTERS.includes('X'));
+  const { room, ps: [a, b, c] } = newGame('categories', ['A', 'B', 'C']);
+  G.setMode(room, 'categories');
+  assert.equal(room.questions.length, 3);
+  assert.equal(new Set(room.questions.map(q => q.letter)).size, 3, 'letter repeated');
+  const allCats = room.questions.flatMap(q => q.categories);
+  assert.equal(new Set(allCats).size, allCats.length, 'category repeated within the game');
+  const cur = room.current;
+  cur.q = { letter: 'S', categories: ['Animal', 'Food', 'Country', 'Movie'] }; // fixed round for the test
+  assert.equal(G.catProblem('  the Shining', 'S'), null);
+  assert.equal(G.catProblem('Pizza', 'S'), "doesn't start with S");
+  assert.equal(G.catProblem('', 'S'), 'empty');
+
+  // Drafts save, stay private while writing; Done locks a sheet
+  assert.ok(G.submitCategoryAnswers(room, a.id, { answers: ['Snake', 'Sandwich', 'Spain', 'Superman'] }).ok);
+  assert.equal(G.publicState(room).current.answers, null, 'sheets visible while writing');
+  assert.ok(!JSON.stringify(G.publicState(room)).includes('Sandwich'));
+  assert.ok(G.submitCategoryAnswers(room, a.id, { answers: ['Snake', 'Sandwich', 'Spain', 'Superman'], done: true }).ok);
+  assert.equal(G.submitCategoryAnswers(room, a.id, { answers: ['x'] }).ok, false, 'edited after Done');
+  assert.ok(G.submitCategoryAnswers(room, b.id, { answers: ['snakes', 'Sushi', 'Pizza', 'The Shining'], done: true }).ok);
+  // C never presses Done: the deadline moves everyone to review with what C had typed
+  assert.ok(G.submitCategoryAnswers(room, c.id, { answers: ['Seal', 'Sandwich', 'Sweden', 'Shrek'] }).ok);
+  assert.equal(G.wordTimeUp(room), false);
+  assert.equal(cur.step, 'review');
+  assert.equal(G.publicState(room).current.answers[c.id][3], 'Shrek');
+  assert.equal(G.publicState(room).current.problems[b.id][2], "doesn't start with S");
+
+  // Vetoes: not your own, not invalid answers; half of the other players (here 1 of 2) knocks an answer out
+  assert.equal(G.vetoCategoryAnswer(room, c.id, { playerId: c.id, index: 3 }).ok, false);
+  assert.equal(G.vetoCategoryAnswer(room, a.id, { playerId: b.id, index: 2 }).ok, false, 'already invalid');
+  assert.ok(G.vetoCategoryAnswer(room, a.id, { playerId: c.id, index: 3 }).ok); // A doubts "Shrek"
+  assert.ok(G.vetoCategoryAnswer(room, b.id, { playerId: a.id, index: 3 }).ok); // B 👎 "Superman"...
+  assert.ok(G.vetoCategoryAnswer(room, b.id, { playerId: a.id, index: 3 }).ok); // ...and takes it back
+  assert.ok(G.readyCategories(room, a.id).ok);
+  assert.ok(G.readyCategories(room, b.id).ok);
+  assert.equal(G.readyCategories(room, c.id).ended, true, 'everyone ready -> scored');
+
+  const r = cur.results;
+  const st = id => r[id].map(x => x.status);
+  // Animal: Snake / snakes (same once plurals are ignored) / Seal -> A, B shared; C unique
+  // Food: Sandwich / Sushi / Sandwich -> A, C shared; B unique
+  // Country: Spain / Pizza (wrong letter) / Sweden -> A, C unique; B invalid
+  // Movie: Superman / The Shining / Shrek (vetoed by A, 1 of 2 others) -> A, B unique; C invalid
+  assert.deepEqual(st(a.id), ['shared', 'shared', 'unique', 'unique']);
+  assert.deepEqual(st(b.id), ['shared', 'unique', 'invalid', 'unique']);
+  assert.deepEqual(st(c.id), ['unique', 'shared', 'unique', 'invalid']);
+  assert.equal(r[c.id][3].reason, 'voted out');
+  assert.deepEqual([a.score, b.score, c.score], [200, 200, 200]);
+  assert.equal(room.phase, 'result');
+  assert.equal(room.history[0].letter, 'S');
+
+  // Round 2: one player drops while writing -> once everyone still here is done, review starts
+  assert.ok(G.advance(room));
+  c.connected = false;
+  G.submitCategoryAnswers(room, a.id, { answers: [], done: true });
+  G.submitCategoryAnswers(room, b.id, { answers: [], done: true });
+  assert.equal(room.current.step, 'review');
 }
 
 // Draw & Guess: rotation, secret word only for the drawer, scoring, early end, disconnects
@@ -245,7 +335,7 @@ function newGame(mode, names = ['A', 'B']) {
   while (G.wordTimeUp(room) && G.advance(room));
   G.finishGame(room);
   assert.equal(room.records[0].mode, 'draw');
-  assert.equal(G.leaderboard(room.records).find(e => e.name === 'C').drawBest, 100);
+  assert.equal(G.leaderboard(room.records).find(e => e.name === 'C').best, room.records[0].players.find(p => p.name === 'C').score);
 
   // Play Again: none of the previous game's words come back
   const before = new Set(room.questions.map(q => q.id));
@@ -422,8 +512,8 @@ function party(mode, names) {
   assert.deepEqual(room.records[1].winners, []); // newest first: the 0-0 game
   assert.deepEqual(room.records[2].winners, ['Ann', 'Ben']);
   assert.deepEqual(G.leaderboard(room.records), [
-    { name: 'Ben', games: 4, wins: 2, words: 9, best: 4, drawBest: 0 },
-    { name: 'Ann', games: 4, wins: 2, words: 8, best: 5, drawBest: 0 },
+    { name: 'Ben', games: 4, wins: 2, points: 9, best: 4 },
+    { name: 'Ann', games: 4, wins: 2, points: 8, best: 5 },
   ]);
   assert.equal(G.setMode(room, 'nope'), false);
 }

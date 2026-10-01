@@ -196,9 +196,12 @@ io.on('connection', socket => {
     const { room, player } = lookup(socket);
     if (!player) return cb({ correct: false, reason: 'closed' });
     const result = G.submitAnswer(room, player.id, text);
-    cb(result);
-    if (result.correct) { afterWord(room); broadcast(room); }
-    else if (!result.reason) socket.to(room.code).emit('opponent', { type: 'wrong', name: player.name });
+    cb(result); // only this player is told the word (they just got it)
+    if (result.correct) {
+      socket.to(room.code).emit('opponent', { type: 'solved', name: player.name, points: result.points });
+      settle(room, result.ended); // a solve during the pause starts the last call
+      broadcast(room);
+    } else if (!result.reason) socket.to(room.code).emit('opponent', { type: 'wrong', name: player.name });
   });
 
   socket.on('skip', (cb = () => {}) => {
@@ -258,16 +261,25 @@ io.on('connection', socket => {
   });
 
   // --- Odd One Out ---
-  const imposterAction = fn => (arg, cb = () => {}) => {
+  // Player action -> game.js -> on success re-arm the round timer (the step may have changed) and broadcast.
+  const playerAction = fn => (arg, cb = () => {}) => {
     const { room, player } = lookup(socket);
     if (!player) return cb({ ok: false, error: 'You are not in a game.' });
     const result = fn(room, player.id, arg);
     cb(result);
     if (result.ok) { settle(room, result.ended); broadcast(room); }
   };
-  socket.on('imposter:clue', imposterAction(G.submitClue));
-  socket.on('imposter:vote', imposterAction(G.submitVote));
-  socket.on('imposter:guess', imposterAction(G.submitImposterGuess));
+  socket.on('imposter:clue', playerAction(G.submitClue));
+  // --- Categories --- (same shape: validate in game.js, then settle timers + broadcast)
+  socket.on('cat:answers', playerAction(G.submitCategoryAnswers));
+  socket.on('cat:veto', playerAction(G.vetoCategoryAnswer));
+  socket.on('cat:ready', playerAction((room, id) => G.readyCategories(room, id)));
+  socket.on('cat:sync', (_, cb = () => {}) => {
+    const { room, player } = lookup(socket);
+    cb(player ? G.categorySync(room, player.id) : {});
+  });
+  socket.on('imposter:vote', playerAction(G.submitVote));
+  socket.on('imposter:guess', playerAction(G.submitImposterGuess));
   // Your own word, for a player who just (re)loaded the round.
   socket.on('imposter:sync', (_, cb = () => {}) => {
     const { room, player } = lookup(socket);
