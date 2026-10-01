@@ -90,9 +90,9 @@ input:disabled { opacity: 0.5; }
 .round b { color: var(--text); font-size: 24px; }
 .round small { display: block; text-transform: none; letter-spacing: 0; font-size: 13px; margin-top: 2px; }
 .diff { font-weight: 700; }
-.diff.d1 { color: var(--good); }
-.diff.d2 { color: var(--accent); }
-.diff.d3 { color: var(--bad); }
+.diff.easy { color: var(--good); }
+.diff.medium { color: var(--accent); }
+.diff.hard { color: var(--bad); }
 .timer { font-size: 38px; font-weight: 900; text-align: center; min-width: 70px; font-variant-numeric: tabular-nums; }
 .timer small { font-size: 16px; color: var(--muted); }
 .timer.urgent { color: var(--bad); animation: pulse 0.5s infinite; }
@@ -183,10 +183,16 @@ input.tile:focus { border-style: solid; background: rgba(255, 203, 61, 0.12); tr
 .mode-icon { font-size: 28px; }
 .mode b { font-size: 16px; }
 .mode small { color: var(--muted); font-size: 12px; line-height: 1.35; }
-.turns { display: flex; align-items: center; justify-content: center; gap: 8px; margin-top: 12px; color: var(--muted); font-size: 14px; }
+.rounds { display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 6px 12px; margin-top: 12px; color: var(--muted); font-size: 14px; }
+.rounds label { font-weight: 700; color: var(--text); text-transform: uppercase; letter-spacing: 1px; font-size: 13px; }
+.rounds small { flex-basis: 100%; text-align: center; }
+.stepper { display: flex; align-items: center; gap: 6px; }
+.stepper input { width: 64px; height: 36px; padding: 0; text-align: center; font-size: 18px; font-weight: 800; -moz-appearance: textfield; }
+.stepper input::-webkit-outer-spin-button, .stepper input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+.stepper input[readonly] { opacity: 0.8; }
 .pill { width: 40px; height: 36px; border-radius: 10px; border: 1px solid var(--line); background: rgba(0, 0, 0, 0.2); color: var(--text); font-weight: 800; cursor: pointer; }
 .pill.on { background: var(--accent); color: #2a0f3d; border-color: var(--accent); }
-.pill:disabled { cursor: default; }
+.pill:disabled { cursor: default; opacity: 0.45; }
 
 /* --- text answers, voice, hints --- */
 .answer-wrap { display: flex; flex-direction: column; align-items: center; gap: 6px; width: 100%; max-width: 520px; text-align: center; }

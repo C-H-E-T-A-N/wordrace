@@ -39,7 +39,8 @@ await until(() => host.state?.players.length === 4);
 // Only the host picks the mode
 assert.equal((await rest[0].emit('setMode', 'draw')).ok, false);
 assert.ok((await host.emit('setMode', 'draw')).ok);
-assert.ok((await host.emit('setDrawTurns', 1)).ok);
+assert.ok((await host.emit('setRounds', 1)).ok);
+assert.equal((await rest[0].emit('setRounds', 2)).ok, false); // only the host
 assert.ok((await host.emit('start')).ok);
 await until(() => players.every(p => p.state?.phase === 'round'));
 console.log('draw game started with 4 players');

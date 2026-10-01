@@ -5,10 +5,19 @@ One room, one lobby: the host picks one of four game modes.
 
 | Mode | How it plays |
 |---|---|
-| 🖼️ **Picture** | Only a picture (emoji). Type what it is, or press 🎤 and **say it**. Stuck? When **every player** presses *Ask for a hint*, a one-line hint appears. 3 rounds × 3 words. |
-| 🔤 **Letters** | No picture, just the word with missing letters. Type straight into the empty boxes. Each round hides more letters (Easy → Medium → Hard). 3 rounds × 3 words. |
-| ⚡ **Classic** | Picture + hint + word with missing letters, type it in the box and Submit. 4 rounds, 30 s each; if time runs out nobody scores. |
+| 🖼️ **Picture** | Only a picture (emoji). Type what it is, or press 🎤 and **say it**. Stuck? When **every player** presses *Ask for a hint*, a one-line hint appears. 3 words per round. |
+| 🔤 **Letters** | No picture, just the word with missing letters. Type straight into the empty boxes. Each round hides more letters (Easy → Medium → Hard), spread over however many rounds you play. 3 words per round. |
+| ⚡ **Classic** | Picture + hint + word with missing letters, type it in the box and Submit. 1 word per round, 30 s each; if time runs out nobody scores. |
 | 🎨 **Draw & Guess** | Pictionary. Players take turns drawing a secret word on a shared canvas while everyone else guesses. Points for fast guessers and for the drawer. |
+
+**Rounds:** in the lobby the host sets how many rounds the selected mode has (each mode remembers its own):
+
+| Mode | Default | Range | One round is |
+|---|---|---|---|
+| Picture | 3 | 1–10 | 3 words |
+| Letters | 3 | 1–10 | 3 words |
+| Classic | 4 | 1–10 | 1 word |
+| Draw & Guess | 1 | 1–5 | every player draws once |
 
 In Picture and Letters, a word doesn't skip when its 15 s run out: it pauses (⏸) so everyone can keep guessing,
 and the host may skip it. Every finished game is saved to the room's **leaderboard** (wins, games, words guessed,
@@ -27,7 +36,7 @@ and a restart ends running games and clears room leaderboards (rooms are kept in
 
 ## Requirements
 
-- [Node.js](https://nodejs.org) 18 or newer (check with `node -v`)
+- [Node.js](https://nodejs.org) 18 or newer (check with `node -v`; with nvm: `nvm use 22`)
 - 2–8 devices on the **same Wi-Fi / LAN** (phones work too)
 
 ## Run it
@@ -57,15 +66,15 @@ Open the game from another device on the same Wi-Fi:
    The lobby shows a 4-letter room code and the LAN link.
 2. **Every other device** (same Wi-Fi): open `http://<host-LAN-IP>:5173` (e.g. `http://192.168.1.10:5173`),
    enter a name and the room code, and click **Join Room**. Or open the `/?room=CODE` link shown in the lobby.
-3. The host picks a **game mode** (everyone sees the choice) and clicks **Start**. At least 2 connected players are needed.
+3. The host picks a **game mode** and the number of **Rounds** (everyone sees both) and clicks **Start**. At least 2 connected players are needed.
 4. After the game: **Play Again** deals brand-new words in the same mode; the host's **Back to lobby** lets you switch modes.
 
 To test on one computer, open several browser tabs. Each tab is a separate player.
 
 ### Draw & Guess on several devices
 
-1. In the lobby the host selects **🎨 Draw & Guess** and, optionally, **Turns per player** (1, 2 or 3).
-   With 3 players and 2 turns each the drawing order is A → B → C → A → B → C (join order).
+1. In the lobby the host selects **🎨 Draw & Guess** and, optionally, the number of **Rounds** (1–5).
+   Each round everyone draws once, in join order: with 3 players and 2 rounds it's A → B → C → A → B → C.
 2. **The drawer** sees *Your word:* and draws it on the canvas with a finger or the mouse:
    4 brush sizes, 8 colours, eraser and clear. Phones work well as drawing pads.
 3. **Everyone else** watches the drawing appear live and types guesses below it. Wrong guesses appear in the
@@ -136,7 +145,7 @@ node server/e2e.mjs
 
 | Topic | Behavior |
 |---|---|
-| **Rooms** | 4-letter code, 2–8 players, stored in server memory. Mode and turns-per-player are room settings only the host can change, between games. |
+| **Rooms** | 4-letter code, 2–8 players, stored in server memory. Mode and rounds are room settings only the host can change, between games. |
 | **Word pools** | Quiz modes: 270 questions in 10 categories (`server/questions.js`). Draw & Guess: its own list of easy-to-draw words in 11 categories (`server/drawWords.js`). Each room shuffles each pool once and deals from it in order; `usedItems` / `usedWords` sets reject anything already played. When a pool runs out it reshuffles but still excludes the game just played. |
 | **Answers** | Case, spaces, punctuation, a leading "a/an/the" and simple plurals are ignored. In Letters/Classic, typing only the missing letters also counts. Voice input sends the recogniser's alternatives and the server checks each. |
 | **Race condition** | Node processes socket events one at a time. The first correct answer locks the word, so later ones get nothing. In Draw & Guess, the order correct guesses arrive in decides 100 / 75 / 50. |

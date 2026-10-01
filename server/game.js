@@ -12,26 +12,35 @@ export const DRAWER_MAX = 100; // Draw & Guess: drawer gets this share-weighted 
 const RECORDS_KEPT = 50;
 const MAX_STROKES = 20_000;
 
+// rounds / maxRounds: default and upper limit of the host's "Rounds" setting for the mode.
 // overtime: when the timer runs out the word pauses and stays open (host may skip) instead of ending.
-// hide: share of letters hidden per round (after the first letter); null = no letter pattern at all.
+// hide: share of letters hidden (after the first letter), rising from `from` in round 1 to `to` in the last round;
+//       null = no letter pattern at all.
 export const MODES = {
   picture: {
-    name: 'Picture', rounds: 3, wordsPerRound: 3, wordMs: 15_000, overtime: true,
+    name: 'Picture', rounds: 3, maxRounds: 10, wordsPerRound: 3, wordMs: 15_000, overtime: true,
     showEmoji: true, hide: null, hintVote: true, input: 'text',
   },
   letters: {
-    name: 'Letters', rounds: 3, wordsPerRound: 3, wordMs: 15_000, overtime: true,
-    showEmoji: false, hide: [0.35, 0.5, 0.65], input: 'boxes',
+    name: 'Letters', rounds: 3, maxRounds: 10, wordsPerRound: 3, wordMs: 15_000, overtime: true,
+    showEmoji: false, hide: { from: 0.35, to: 0.65 }, input: 'boxes',
   },
   classic: {
-    name: 'Classic', rounds: 4, wordsPerRound: 1, wordMs: 30_000, overtime: false,
-    showEmoji: true, hide: [0.4, 0.4, 0.4, 0.4], showHint: true, input: 'text',
+    name: 'Classic', rounds: 4, maxRounds: 10, wordsPerRound: 1, wordMs: 30_000, overtime: false,
+    showEmoji: true, hide: { from: 0.4, to: 0.4 }, showHint: true, input: 'text',
   },
-  // rounds = one drawing turn per player per "turns per player", set when the game starts
+  // A Draw & Guess round = every player draws once, so turns = players x rounds.
   draw: {
-    name: 'Draw & Guess', wordsPerRound: 1, wordMs: 60_000, overtime: false, input: 'draw',
+    name: 'Draw & Guess', rounds: 1, maxRounds: 5, wordsPerRound: 1, wordMs: 60_000, overtime: false, input: 'draw',
   },
 };
+
+// Share of letters hidden in `round` of `rounds` (rounds = 1 sits in the middle).
+export function hideRatio(mode, round, rounds) {
+  const { from, to } = mode.hide;
+  return from + (to - from) * (rounds === 1 ? 0.5 : (round - 1) / (rounds - 1));
+}
+const difficulty = ratio => (ratio < 0.45 ? 'Easy' : ratio < 0.58 ? 'Medium' : 'Hard');
 
 // "  Pizza ", "PIZZA", "pi-zza" -> "pizza"
 export const normalize = s => String(s ?? '').toLowerCase().replace(/[^a-z0-9]/g, '');
@@ -94,7 +103,7 @@ export function createRoom(code) {
     code,
     hostId: null,
     mode: 'picture',
-    drawTurns: 1, // Draw & Guess: turns per player
+    rounds: Object.fromEntries(Object.entries(MODES).map(([k, m]) => [k, m.rounds])), // host's setting, per mode
     players: [],
     phase: 'lobby', // lobby | round | result | final
     wordNo: 0, // words (or drawing turns) dealt so far this game
@@ -118,7 +127,7 @@ export function addPlayer(room, name) {
 
 export const modeOf = room => MODES[room.mode];
 export const isDraw = room => room.mode === 'draw';
-const totalRounds = room => (isDraw(room) ? room.turns.length || room.players.length * room.drawTurns : modeOf(room).rounds);
+const totalRounds = room => (isDraw(room) ? room.turns.length || room.players.length * room.rounds.draw : room.rounds[room.mode]);
 export const roundOf = room => Math.ceil(room.wordNo / modeOf(room).wordsPerRound);
 const isRoundEnd = room => room.wordNo % modeOf(room).wordsPerRound === 0;
 const between = room => ['lobby', 'final'].includes(room.phase);
@@ -129,9 +138,9 @@ export function setMode(room, mode) {
   return true;
 }
 
-export function setDrawTurns(room, n) {
-  if (![1, 2, 3].includes(n) || !between(room)) return false;
-  room.drawTurns = n;
+export function setRounds(room, n) {
+  if (!Number.isInteger(n) || n < 1 || n > modeOf(room).maxRounds || !between(room)) return false;
+  room.rounds[room.mode] = n;
   return true;
 }
 
@@ -139,12 +148,12 @@ export function startGame(room, now = Date.now()) {
   if (isDraw(room)) {
     // Deterministic order: join order, repeated per "turns per player". A -> B -> C -> A -> B -> C
     const order = room.players.map(p => p.id);
-    room.turns = Array.from({ length: order.length * room.drawTurns }, (_, i) => order[i % order.length]);
+    room.turns = Array.from({ length: order.length * room.rounds.draw }, (_, i) => order[i % order.length]);
     room.questions = drawFrom(room.decks.draw, room.turns.length);
   } else {
     const mode = modeOf(room);
     room.turns = [];
-    room.questions = drawFrom(room.decks.quiz, mode.rounds * mode.wordsPerRound);
+    room.questions = drawFrom(room.decks.quiz, room.rounds[room.mode] * mode.wordsPerRound);
   }
   room.players.forEach(p => (p.score = 0));
   room.history = [];
@@ -172,11 +181,13 @@ export function advance(room, now = Date.now()) {
 export function nextWord(room, now = Date.now()) {
   const mode = modeOf(room);
   const q = room.questions[room.wordNo++];
-  const pattern = mode.hide && makePattern(q.answer, mode.hide[roundOf(room) - 1]);
+  const ratio = mode.hide && hideRatio(mode, roundOf(room), room.rounds[room.mode]);
+  const pattern = mode.hide && makePattern(q.answer, ratio);
   room.current = {
     q,
     pattern,
     missing: pattern ? pattern.map((c, i) => (c === '_' ? q.answer[i] : '')).join('') : null,
+    difficulty: mode.hide ? difficulty(ratio) : null,
     winnerId: null,
     locked: false,
     overtime: false,
@@ -406,6 +417,7 @@ function publicCurrent(room) {
     hintVotes: [...c.hintVotes],
     hintNeeded: room.players.filter(p => p.connected).length,
     pattern: c.pattern,
+    difficulty: c.difficulty,
     displayPattern: c.pattern?.join(' ') ?? null,
     overtime: c.overtime,
     winnerId: c.winnerId,
@@ -419,7 +431,8 @@ export function publicState(room, now = Date.now()) {
     code: room.code,
     hostId: room.hostId,
     mode: room.mode,
-    drawTurns: room.drawTurns,
+    roundsSetting: room.rounds[room.mode], // what the host picked for the selected mode
+    roundsMax: mode.maxRounds,
     modeInfo: {
       name: mode.name, rounds: totalRounds(room), wordsPerRound: mode.wordsPerRound,
       wordMs: mode.wordMs, overtime: mode.overtime, input: mode.input,

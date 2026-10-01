@@ -18,7 +18,6 @@ const MODE_CARDS = [
   { key: 'draw', icon: '🎨', name: 'Draw & Guess', desc: 'Take turns drawing a secret word while the others guess.' },
 ];
 const MODE_ICON = Object.fromEntries(MODE_CARDS.map(m => [m.key, m.icon]));
-const DIFFICULTY = ['Easy', 'Medium', 'Hard'];
 const Recognition = window.SpeechRecognition || window.webkitSpeechRecognition;
 
 function useNow() {
@@ -79,7 +78,7 @@ export default function App() {
     again: () => socket.emit('playAgain', ack),
     lobby: () => socket.emit('toLobby', ack),
     mode: m => socket.emit('setMode', m, ack),
-    drawTurns: n => socket.emit('setDrawTurns', n, ack),
+    rounds: n => socket.emit('setRounds', n, ack),
     skip: () => socket.emit('skip', ack),
     leave,
   };
@@ -147,14 +146,36 @@ function ModePicker({ game, isHost, actions }) {
           </button>
         ))}
       </div>
-      {game.mode === 'draw' && (
-        <div className="turns">
-          <span>Turns per player</span>
-          {[1, 2, 3].map(n => (
-            <button key={n} className={`pill ${game.drawTurns === n ? 'on' : ''}`} disabled={!isHost} onClick={() => actions.drawTurns(n)}>{n}</button>
-          ))}
-        </div>
-      )}
+      <RoundsInput game={game} isHost={isHost} actions={actions} />
+    </div>
+  );
+}
+
+// Host sets how many rounds the selected mode has (each mode remembers its own). Everyone else sees the value.
+function RoundsInput({ game, isHost, actions }) {
+  // Local copy so quick repeated clicks build on each other instead of waiting for the server's echo.
+  const [n, setN] = useState(game.roundsSetting);
+  useEffect(() => setN(game.roundsSetting), [game.roundsSetting, game.mode]);
+  const max = game.roundsMax;
+  const set = v => {
+    if (!Number.isInteger(v) || v < 1 || v > max || v === n) return;
+    setN(v);
+    actions.rounds(v);
+  };
+  const per = game.modeInfo.wordsPerRound;
+  const summary = game.mode === 'draw'
+    ? `each player draws ${n === 1 ? 'once' : `${n} times`} → ${n * game.players.length} turns`
+    : per > 1 ? `${n} × ${per} words = ${n * per} words` : `${n} ${n === 1 ? 'word' : 'words'}`;
+  return (
+    <div className="rounds">
+      <label htmlFor="rounds-input">Rounds</label>
+      <div className="stepper">
+        <button type="button" className="pill" disabled={!isHost || n <= 1} onClick={() => set(n - 1)} aria-label="Fewer rounds">−</button>
+        <input id="rounds-input" type="number" inputMode="numeric" min={1} max={max} value={n} readOnly={!isHost}
+          onFocus={e => e.target.select()} onChange={e => set(Number(e.target.value))} />
+        <button type="button" className="pill" disabled={!isHost || n >= max} onClick={() => set(n + 1)} aria-label="More rounds">+</button>
+      </div>
+      <small>{summary} · max {max}</small>
     </div>
   );
 }
@@ -384,7 +405,7 @@ function Game({ game, me, activity, actions }) {
   const recent = activity && now - activity.at < 1500 && open;
   const winner = game.players.find(p => p.id === c.winnerId);
   const next = !roundEnd ? `Next word in ${secs}…`
-    : game.round < info.rounds ? `Round ${game.round + 1}${game.mode === 'letters' ? ` (${DIFFICULTY[game.round]})` : ''} starts in ${secs}…`
+    : game.round < info.rounds ? `Round ${game.round + 1}${game.mode === 'letters' ? ' (harder!)' : ''} starts in ${secs}…`
     : `Final results in ${secs}…`;
 
   return (
@@ -395,7 +416,7 @@ function Game({ game, me, activity, actions }) {
           <small>
             {MODE_ICON[game.mode]} {info.name}
             {multi && <> · Word {game.word} / {info.wordsPerRound}</>}
-            {game.mode === 'letters' && <> · <span className={`diff d${game.round}`}>{DIFFICULTY[game.round - 1]}</span></>}
+            {c.difficulty && game.mode === 'letters' && <> · <span className={`diff ${c.difficulty.toLowerCase()}`}>{c.difficulty}</span></>}
           </small>
         </div>
         <div className={`timer ${open && !c.overtime && secs <= 5 ? 'urgent' : ''}`}>

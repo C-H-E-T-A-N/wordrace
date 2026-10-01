@@ -200,10 +200,10 @@ io.on('connection', socket => {
     broadcast(room);
   });
 
-  socket.on('setDrawTurns', (n, cb = () => {}) => {
+  socket.on('setRounds', (n, cb = () => {}) => {
     const { room, player } = lookup(socket);
-    if (!player || room.hostId !== player.id) return cb({ ok: false, error: 'Only the host can change this.' });
-    if (!G.setDrawTurns(room, n)) return cb({ ok: false, error: 'Can only be changed between games.' });
+    if (!player || room.hostId !== player.id) return cb({ ok: false, error: 'Only the host can change the rounds.' });
+    if (!G.setRounds(room, n)) return cb({ ok: false, error: `Rounds must be 1–${G.modeOf(room).maxRounds}, set between games.` });
     cb({ ok: true });
     broadcast(room);
   });

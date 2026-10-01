@@ -27,7 +27,7 @@ for (const q of POOL) {
 }
 
 // Patterns: same length, first letter + spaces kept, at least one hidden
-for (const q of POOL) for (const ratio of G.MODES.letters.hide) {
+for (const q of POOL) for (const ratio of [0.35, 0.5, 0.65, 0.4]) {
   const p = G.makePattern(q.answer, ratio);
   assert.equal(p.length, q.answer.length);
   assert.equal(p[0], q.answer[0]);
@@ -35,10 +35,39 @@ for (const q of POOL) for (const ratio of G.MODES.letters.hide) {
   p.forEach((c, i) => q.answer[i] === ' ' && assert.equal(c, ' '));
 }
 
-// Letters mode gets harder each round
+// Letters mode gets harder each round, whatever the number of rounds; Classic stays level
 {
-  const hidden = G.MODES.letters.hide.map(r => G.makePattern('STRAWBERRY', r).filter(c => c === '_').length);
+  const L = G.MODES.letters;
+  const hidden = [1, 2, 3].map(r => G.makePattern('STRAWBERRY', G.hideRatio(L, r, 3)).filter(c => c === '_').length);
   assert.ok(hidden[0] < hidden[1] && hidden[1] < hidden[2], `hidden per round: ${hidden}`);
+  const r6 = [1, 2, 3, 4, 5, 6].map(r => G.hideRatio(L, r, 6));
+  assert.ok(r6.every((v, i) => i === 0 || v > r6[i - 1]) && r6[0] === 0.35 && Math.abs(r6[5] - 0.65) < 1e-9);
+  assert.equal(G.hideRatio(L, 1, 1), 0.5);
+  assert.equal(G.hideRatio(G.MODES.classic, 7, 10), 0.4);
+}
+
+// Rounds setting: per mode, host-chosen, bounded, only between games, and it sizes the game
+{
+  const room = G.createRoom('RNDS');
+  const ps = ['A', 'B', 'C'].map(n => G.addPlayer(room, n));
+  ps.forEach(p => (p.connected = true));
+  for (const [mode, n, words] of [['picture', 5, 15], ['letters', 1, 3], ['classic', 7, 7], ['draw', 2, 6]]) {
+    G.setMode(room, mode);
+    assert.equal(G.setRounds(room, 0), false);
+    assert.equal(G.setRounds(room, G.MODES[mode].maxRounds + 1), false);
+    assert.equal(G.setRounds(room, 2.5), false);
+    assert.ok(G.setRounds(room, n));
+    assert.equal(G.publicState(room).modeInfo.rounds, mode === 'draw' ? 6 : n);
+    G.startGame(room);
+    assert.equal(room.questions.length, words, mode);
+    assert.equal(G.setRounds(room, 1), false, 'changed mid-game');
+    G.toLobby(room);
+  }
+  // each mode remembers its own setting
+  G.setMode(room, 'picture');
+  assert.equal(G.publicState(room).roundsSetting, 5);
+  G.setMode(room, 'classic');
+  assert.equal(G.publicState(room).roundsSetting, 7);
 }
 
 // Draw & Guess word list: unique, drawable-length words
@@ -157,8 +186,8 @@ function newGame(mode, names = ['A', 'B']) {
     const ps = ['A', 'B', 'C', 'D'].map(n => G.addPlayer(room, n));
     ps.forEach(p => (p.connected = true));
     assert.ok(G.setMode(room, 'draw'));
-    assert.ok(G.setDrawTurns(room, 2));
-    assert.equal(G.setDrawTurns(room, 5), false);
+    assert.ok(G.setRounds(room, 2));
+    assert.equal(G.setRounds(room, 6), false);
     G.startGame(room);
     return { room, ps };
   })();
